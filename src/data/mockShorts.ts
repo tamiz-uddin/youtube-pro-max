@@ -1,0 +1,40 @@
+import { ShortItem } from '../types';
+
+export const MOCK_SHORTS: ShortItem[] = [
+  {
+    id: 'short-01',
+    title: 'When your code compiles on the very first try with zero warnings 😂 #developer #coding #tech',
+    videoUrl: 'https://vjs.zencdn.net/v/oceans.mp4',
+    channelTitle: 'TechHumor Daily',
+    channelAvatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?q=80&w=200&auto=format&fit=crop',
+    likes: '842K',
+    commentsCount: '4.8K',
+    soundTitle: 'Original Cyber Sound - Pro Mix',
+    soundArtist: 'BeatMaster',
+    tags: ['coding', 'humor', 'developer', 'reactnative'],
+  },
+  {
+    id: 'short-02',
+    title: 'Top 3 AI Tools that will 10x your productivity in 2026! 🚀 Number 2 is insane!',
+    videoUrl: 'https://media.w3.org/2010/05/sintel/trailer.mp4',
+    channelTitle: 'AI Navigator',
+    channelAvatar: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?q=80&w=200&auto=format&fit=crop',
+    likes: '1.2M',
+    commentsCount: '12.4K',
+    soundTitle: 'Future Electronic Vibes',
+    soundArtist: 'SynthWave Records',
+    tags: ['ai', 'tech', 'future', 'productivity'],
+  },
+  {
+    id: 'short-03',
+    title: 'Can you solve this quantum physics paradox in 30 seconds? 🤯 Drop answer in comments!',
+    videoUrl: 'https://www.w3schools.com/html/mov_bbb.mp4',
+    channelTitle: 'Physics Mindblow',
+    channelAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=200&auto=format&fit=crop',
+    likes: '620K',
+    commentsCount: '8.1K',
+    soundTitle: 'Cosmic Wonder Ambient Theme',
+    soundArtist: 'Astro Beats',
+    tags: ['science', 'quantum', 'riddle', 'mindblown'],
+  },
+];
