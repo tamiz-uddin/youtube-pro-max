@@ -6,10 +6,9 @@ import { AppProvider, useApp } from './src/context/AppContext';
 import { MobileShell } from './src/components/common/MobileShell';
 import { TopBar } from './src/components/common/TopBar';
 import { BottomTabBar } from './src/components/common/BottomTabBar';
-import { SearchModal } from './src/components/common/SearchModal';
 import { HomeScreen } from './src/screens/HomeScreen';
-import { ShortsScreen } from './src/screens/ShortsScreen';
-import { StudioScreen } from './src/screens/StudioScreen';
+import { DownloadScreen } from './src/screens/DownloadScreen';
+import { DeviceScreen } from './src/screens/DeviceScreen';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { ProMaxPlayer } from './src/components/player/ProMaxPlayer';
@@ -27,10 +26,10 @@ const MainAppContent: React.FC = () => {
     switch (activeTab) {
       case 'home':
         return <HomeScreen />;
-      case 'shorts':
-        return <ShortsScreen />;
-      case 'studio':
-        return <StudioScreen />;
+      case 'download':
+        return <DownloadScreen />;
+      case 'device':
+        return <DeviceScreen />;
       case 'library':
         return <LibraryScreen />;
       case 'settings':
@@ -46,14 +45,13 @@ const MainAppContent: React.FC = () => {
         styles.safeArea,
         {
           backgroundColor: colors.background,
-          paddingTop: activeTab !== 'shorts' ? topInset : 0,
+          paddingTop: topInset,
         },
       ]}
     >
       <StatusBar style="light" />
 
-      {/* Top Bar (hidden on full-screen shorts tab for immersion) */}
-      {activeTab !== 'shorts' && <TopBar />}
+      <TopBar />
 
       {/* Active Screen View */}
       <View style={styles.screenContainer}>{renderActiveScreen()}</View>
@@ -66,9 +64,6 @@ const MainAppContent: React.FC = () => {
 
       {/* Full-Screen Pro Max Video Player Modal */}
       <ProMaxPlayer />
-
-      {/* Global Search Modal */}
-      <SearchModal />
     </View>
   );
 };

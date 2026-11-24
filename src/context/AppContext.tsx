@@ -1,21 +1,39 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef, ReactNode } from 'react';
 import {
   VideoItem,
-  ShortItem,
-  OfflineDownload,
   TimestampNote,
   Playlist,
   VideoFilterSettings,
   AppTheme,
-  StudioAnalytics,
-  QualityOption,
+  DownloadedVideo,
+  DeviceVideo,
 } from '../types';
 import { themes, ThemeColors } from '../theme/colors';
-import { MOCK_SHORTS } from '../data/mockShorts';
 import { storageService } from '../services/storageService';
-import { youtubeService } from '../services/youtubeService';
+import { DownloadFormat, YouTubeVideoInfo, youtubeService } from '../services/youtubeService';
+import { ActiveDownload, DownloadCancelledError, downloadService } from '../services/downloadService';
+import { deviceMediaService } from '../services/deviceMediaService';
+import { deviceToVideoItem, downloadedToVideoItem } from '../utils/videoFormat';
 
 export type PlayerMode = 'closed' | 'minimized' | 'full';
+export type AppTab = 'home' | 'download' | 'device' | 'library' | 'settings';
+
+// Implemented by the mounted player, so seeks from anywhere
+// (A-B loop, notes, SponsorBlock, frame step) move the real video.
+export interface PlayerController {
+  seekTo: (seconds: number) => void;
+}
+
+export interface DownloadJob {
+  youtubeId: string;
+  title: string;
+  thumbnail: string;
+  formatLabel: string;
+  bytesWritten: number;
+  totalBytes: number | null;
+  status: 'downloading' | 'failed';
+  error?: string;
+}
 
 interface ABLoopState {
   enabled: boolean;
@@ -29,17 +47,9 @@ interface AppContextType {
   colors: ThemeColors;
   setTheme: (theme: AppTheme) => void;
 
-  // Active Screen / Navigation
-  activeTab: 'home' | 'shorts' | 'studio' | 'library' | 'settings';
-  setActiveTab: (tab: 'home' | 'shorts' | 'studio' | 'library' | 'settings') => void;
-
-  // Search & Discovery
-  searchQuery: string;
-  setSearchQuery: (query: string) => void;
-  selectedCategory: string;
-  setSelectedCategory: (cat: string) => void;
-  isSearchModalOpen: boolean;
-  setIsSearchModalOpen: (open: boolean) => void;
+  // Navigation
+  activeTab: AppTab;
+  setActiveTab: (tab: AppTab) => void;
 
   // Video Player Suite
   currentVideo: VideoItem | null;
@@ -55,6 +65,8 @@ interface AppContextType {
 
   // Player Actions
   playVideo: (video: VideoItem, startAt?: number) => void;
+  playDownloadedVideo: (video: DownloadedVideo, startAt?: number) => boolean;
+  playDeviceVideo: (video: DeviceVideo) => Promise<void>;
   pauseVideo: () => void;
   resumeVideo: () => void;
   setPlayerMode: (mode: PlayerMode) => void;
@@ -65,19 +77,24 @@ interface AppContextType {
   setSleepTimer: (minutes: number | null) => void;
   triggerFrameStep: (forward: boolean) => void;
   updateVideoProgress: (current: number, total: number) => void;
+  registerPlayerController: (controller: PlayerController | null) => void;
 
-  // Permanent Offline Downloads (NEVER Auto-Delete Guarantee)
-  downloads: OfflineDownload[];
-  startDownload: (video: VideoItem, quality: QualityOption) => Promise<void>;
-  removeDownload: (id: string) => Promise<void>;
-  isDownloaded: (videoId: string) => boolean;
+  // Downloads (files in app storage, metadata in AsyncStorage)
+  downloadedVideos: DownloadedVideo[];
+  downloadedVideoItems: VideoItem[];
+  downloadJobs: DownloadJob[];
+  startDownload: (info: YouTubeVideoInfo, format: DownloadFormat) => void;
+  cancelDownload: (youtubeId: string) => void;
+  dismissDownloadJob: (youtubeId: string) => void;
+  deleteDownloadedVideo: (id: string) => Promise<void>;
+  isYoutubeVideoDownloaded: (youtubeId: string) => boolean;
 
   // Timestamped Notes
   notes: TimestampNote[];
   addTimestampNote: (noteText: string, timestamp?: number) => Promise<void>;
   removeTimestampNote: (id: string) => Promise<void>;
 
-  // Library & Social
+  // Library
   likedVideoIds: string[];
   toggleLike: (videoId: string) => Promise<void>;
   isLiked: (videoId: string) => boolean;
@@ -85,22 +102,6 @@ interface AppContextType {
   clearHistory: () => Promise<void>;
   playlists: Playlist[];
   createPlaylist: (name: string, firstVideo?: VideoItem) => Promise<void>;
-
-  // Shorts State
-  shorts: ShortItem[];
-  currentShortIndex: number;
-  setCurrentShortIndex: (index: number) => void;
-
-  // Creator Studio & Imports
-  studioAnalytics: StudioAnalytics;
-  userUploadedVideos: VideoItem[];
-  uploadNewVideo: (video: Omit<VideoItem, 'id' | 'views' | 'likes'>) => Promise<void>;
-  importYoutubeVideo: (video: VideoItem) => Promise<void>;
-  deleteUserVideo: (videoId: string) => Promise<void>;
-
-  // API Config
-  apiSettings: { mode: 'hybrid' | 'piped' | 'official'; apiKey?: string };
-  updateApiSettings: (settings: { mode: 'hybrid' | 'piped' | 'official'; apiKey?: string }) => Promise<void>;
 
   // Device Frame Viewport (for desktop testing)
   isDeviceFrameActive: boolean;
@@ -117,33 +118,11 @@ const defaultFilters: VideoFilterSettings = {
   vocalEnhance: false,
 };
 
-const initialAnalytics: StudioAnalytics = {
-  views28d: 184520,
-  viewsGrowth: 28.4,
-  watchTimeHours: 6420,
-  subscribers: 24800,
-  subscribersGrowth: 14.2,
-  estimatedRevenue: 1480.5,
-  ctrPercent: 8.9,
-  viewsHistory: [
-    { day: 'Mon', views: 4200 },
-    { day: 'Tue', views: 6100 },
-    { day: 'Wed', views: 5800 },
-    { day: 'Thu', views: 8900 },
-    { day: 'Fri', views: 9400 },
-    { day: 'Sat', views: 14200 },
-    { day: 'Sun', views: 12100 },
-  ],
-};
-
 const AppContext = createContext<AppContextType | null>(null);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [theme, setThemeState] = useState<AppTheme>('oled-black');
-  const [activeTab, setActiveTab] = useState<'home' | 'shorts' | 'studio' | 'library' | 'settings'>('home');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('All');
-  const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<AppTab>('home');
   const [isDeviceFrameActive, setIsDeviceFrameActive] = useState(false);
 
   // Player state
@@ -158,57 +137,61 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
   const [sponsorSkipToast, setSponsorSkipToast] = useState<string | null>(null);
 
-  // Offline Downloads & Notes
-  const [downloads, setDownloads] = useState<OfflineDownload[]>([]);
+  // Downloads, notes & library
+  const [downloadedVideos, setDownloadedVideos] = useState<DownloadedVideo[]>([]);
+  const [jobsById, setJobsById] = useState<Record<string, DownloadJob>>({});
   const [notes, setNotes] = useState<TimestampNote[]>([]);
   const [likedVideoIds, setLikedVideoIds] = useState<string[]>([]);
   const [watchHistory, setWatchHistory] = useState<{ videoId: string; watchedAt: string; progressPercent: number }[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  const [shorts] = useState<ShortItem[]>(MOCK_SHORTS);
-  const [currentShortIndex, setCurrentShortIndex] = useState(0);
 
-  // Studio & User Uploads
-  const [studioAnalytics] = useState<StudioAnalytics>(initialAnalytics);
-  const [userUploadedVideos, setUserUploadedVideos] = useState<VideoItem[]>([]);
-  const [apiSettings, setApiSettingsState] = useState<{ mode: 'hybrid' | 'piped' | 'official'; apiKey?: string }>({
-    mode: 'hybrid',
-  });
+  // Refs read by callbacks that native listeners and download tasks hold across renders.
+  const controllerRef = useRef<PlayerController | null>(null);
+  const currentVideoRef = useRef<VideoItem | null>(null);
+  const durationRef = useRef(0);
+  const lastSponsorSkipRef = useRef<{ end: number; at: number } | null>(null);
+  const activeDownloadsRef = useRef<Record<string, ActiveDownload>>({});
+  // Downloads between "requested" and "file transfer started" (SponsorBlock lookup runs first).
+  const pendingDownloadsRef = useRef<Set<string>>(new Set());
+  const downloadedVideosRef = useRef<DownloadedVideo[]>([]);
+  currentVideoRef.current = currentVideo;
+  durationRef.current = duration;
+  downloadedVideosRef.current = downloadedVideos;
 
   // Load persistent storage on startup
   useEffect(() => {
     async function loadSavedData() {
-      const [
-        savedTheme,
-        savedDownloads,
-        savedNotes,
-        savedLikes,
-        savedHistory,
-        savedPlaylists,
-        savedApi,
-        savedUserVideos,
-      ] = await Promise.all([
-        storageService.getSavedTheme(),
-        storageService.getPermanentDownloads(),
-        storageService.getTimestampNotes(),
-        storageService.getLikedVideoIds(),
-        storageService.getWatchHistory(),
-        storageService.getPlaylists(),
-        storageService.getApiSettings(),
-        storageService.getUserVideos(),
-      ]);
+      const [savedTheme, savedDownloads, savedNotes, savedLikes, savedHistory, savedPlaylists] =
+        await Promise.all([
+          storageService.getSavedTheme(),
+          storageService.getDownloadedVideos(),
+          storageService.getTimestampNotes(),
+          storageService.getLikedVideoIds(),
+          storageService.getWatchHistory(),
+          storageService.getPlaylists(),
+        ]);
 
       setThemeState(savedTheme);
-      setDownloads(savedDownloads);
       setNotes(savedNotes);
       setLikedVideoIds(savedLikes);
       setWatchHistory(savedHistory);
       setPlaylists(savedPlaylists);
-      setApiSettingsState(savedApi);
-      if (savedUserVideos && savedUserVideos.length > 0) {
-        setUserUploadedVideos(savedUserVideos);
+
+      // Drop entries whose file no longer exists (e.g. app data restored without files).
+      const present = savedDownloads.filter((v) => downloadService.fileExists(v));
+      setDownloadedVideos(present);
+      if (present.length !== savedDownloads.length) {
+        storageService.saveDownloadedVideos(present).catch(() => {});
       }
     }
     loadSavedData();
+  }, []);
+
+  // Cancel in-flight downloads if the provider unmounts
+  useEffect(() => {
+    return () => {
+      Object.values(activeDownloadsRef.current).forEach((d) => d.cancel());
+    };
   }, []);
 
   // Sleep Timer countdown ticker
@@ -231,24 +214,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (abLoop && abLoop.enabled && currentTime >= abLoop.end) {
       seekTo(abLoop.start);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTime, abLoop]);
 
-  // Theme changer
   const setTheme = async (newTheme: AppTheme) => {
     setThemeState(newTheme);
     await storageService.saveTheme(newTheme);
   };
 
-  const updateApiSettings = async (settings: { mode: 'hybrid' | 'piped' | 'official'; apiKey?: string }) => {
-    setApiSettingsState(settings);
-    await storageService.saveApiSettings(settings);
-  };
-
+  // === PLAYER ===
   const handleSetPlayerMode = (mode: PlayerMode) => {
     setPlayerMode(mode);
     if (mode === 'closed') {
       setIsPlaying(false);
       setCurrentTime(0);
+      setDuration(0);
       setCurrentVideo(null);
     }
   };
@@ -258,52 +238,70 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setPlayerMode('full');
     setIsPlaying(true);
     setCurrentTime(startAt ?? 0);
+    setDuration(0);
+    lastSponsorSkipRef.current = null;
     storageService.recordWatchHistory(video.id, startAt ?? 0);
+    setWatchHistory((prev) =>
+      [
+        { videoId: video.id, watchedAt: new Date().toISOString(), progressPercent: startAt ?? 0 },
+        ...prev.filter((h) => h.videoId !== video.id),
+      ].slice(0, 50)
+    );
+  };
 
-    // If video has no videoUrl yet, fetch real stream dynamically
-    if (!video.videoUrl && video.id) {
-      youtubeService.getStreamUrl(video.id).then((resolvedUrl) => {
-        if (resolvedUrl) {
-          setCurrentVideo((prev) =>
-            prev && prev.id === video.id ? { ...prev, videoUrl: resolvedUrl } : prev
-          );
-        }
-      });
-    }
+  /** Returns false if the file is missing. */
+  const playDownloadedVideo = (video: DownloadedVideo, startAt?: number) => {
+    if (!downloadService.fileExists(video)) return false;
+    playVideo(downloadedToVideoItem(video), startAt);
+    return true;
+  };
+
+  const playDeviceVideo = async (video: DeviceVideo) => {
+    const uri = await deviceMediaService.getPlayableUri(video.id);
+    playVideo(deviceToVideoItem(video, uri));
+  };
+
+  const registerPlayerController = (controller: PlayerController | null) => {
+    controllerRef.current = controller;
   };
 
   const pauseVideo = () => setIsPlaying(false);
   const resumeVideo = () => setIsPlaying(true);
 
   const seekTo = (seconds: number) => {
-    const clamped = Math.max(0, Math.min(seconds, duration || 9999));
+    const total = durationRef.current;
+    const clamped = Math.max(0, total > 0 ? Math.min(seconds, total) : seconds);
     setCurrentTime(clamped);
+    controllerRef.current?.seekTo(clamped);
   };
 
   const setSleepTimer = (minutes: number | null) => {
-    if (minutes === null) {
-      setSleepTimerRemaining(null);
-    } else {
-      setSleepTimerRemaining(minutes * 60);
-    }
+    setSleepTimerRemaining(minutes === null ? null : minutes * 60);
   };
 
   const triggerFrameStep = (forward: boolean) => {
     // 1 frame at 25fps = 0.04 seconds
-    const delta = forward ? 0.04 : -0.04;
-    seekTo(currentTime + delta);
+    seekTo(currentTime + (forward ? 0.04 : -0.04));
   };
 
   const updateVideoProgress = (current: number, total: number) => {
     setCurrentTime(current);
-    if (total > 0) setDuration(total);
+    if (total > 0) {
+      setDuration(total);
+      durationRef.current = total;
+    }
 
-    // Auto-Sponsor Skip check
-    if (currentVideo?.sponsorSegments) {
-      for (const segment of currentVideo.sponsorSegments) {
+    // SponsorBlock segments saved with the download
+    const segments = currentVideoRef.current?.sponsorSegments;
+    if (segments) {
+      for (const segment of segments) {
         if (current >= segment.start && current < segment.end) {
+          // Progress events can still report the old position while a seek is in flight.
+          const last = lastSponsorSkipRef.current;
+          if (last && last.end === segment.end && Date.now() - last.at < 2000) break;
+          lastSponsorSkipRef.current = { end: segment.end, at: Date.now() };
           seekTo(segment.end);
-          setSponsorSkipToast('⚡ SponsorBlock: Skipped promotional sponsor segment');
+          setSponsorSkipToast('SponsorBlock: skipped sponsor segment');
           setTimeout(() => setSponsorSkipToast(null), 3000);
           break;
         }
@@ -311,41 +309,107 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  // === PERMANENT DOWNLOADS (NEVER AUTO-DELETE GUARANTEE) ===
-  const startDownload = async (video: VideoItem, quality: QualityOption) => {
-    const sizeMap: Record<QualityOption, number> = {
-      '1080p': 142.5,
-      '720p': 78.2,
-      '480p': 34.6,
-      audio_only: 12.8,
-    };
-
-    const newDownload: OfflineDownload = {
-      id: `download-${Date.now()}`,
-      videoId: video.id,
-      title: video.title,
-      thumbnail: video.thumbnail,
-      videoUrl: video.videoUrl,
-      quality,
-      fileSizeMb: sizeMap[quality],
-      downloadedAt: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      isPermanent: true, // Permanent: NEVER expires or auto-deletes!
-      channelTitle: video.channelTitle,
-      duration: video.duration,
-    };
-
-    const updated = await storageService.savePermanentDownload(newDownload);
-    setDownloads(updated);
+  // === DOWNLOADS ===
+  const persistDownloads = async (next: DownloadedVideo[]) => {
+    downloadedVideosRef.current = next;
+    setDownloadedVideos(next);
+    await storageService.saveDownloadedVideos(next);
   };
 
-  const removeDownload = async (id: string) => {
-    const updated = await storageService.removePermanentDownload(id);
-    setDownloads(updated);
+  const updateJob = (youtubeId: string, patch: Partial<DownloadJob>) => {
+    setJobsById((prev) => (prev[youtubeId] ? { ...prev, [youtubeId]: { ...prev[youtubeId], ...patch } } : prev));
   };
 
-  const isDownloaded = (videoId: string) => {
-    return downloads.some((item) => item.videoId === videoId);
+  const removeJob = (youtubeId: string) => {
+    setJobsById((prev) => {
+      const { [youtubeId]: _removed, ...rest } = prev;
+      return rest;
+    });
   };
+
+  const startDownload = (info: YouTubeVideoInfo, format: DownloadFormat) => {
+    const { youtubeId } = info;
+    if (activeDownloadsRef.current[youtubeId] || pendingDownloadsRef.current.has(youtubeId)) return;
+    pendingDownloadsRef.current.add(youtubeId);
+
+    setJobsById((prev) => ({
+      ...prev,
+      [youtubeId]: {
+        youtubeId,
+        title: info.title,
+        thumbnail: info.thumbnail,
+        formatLabel: format.label,
+        bytesWritten: 0,
+        totalBytes: format.sizeBytes,
+        status: 'downloading',
+      },
+    }));
+
+    (async () => {
+      const sponsorSegments = await youtubeService.getSponsorSegments(youtubeId);
+      // Cancelled while the SponsorBlock lookup was running
+      if (!pendingDownloadsRef.current.delete(youtubeId)) return;
+      let lastUpdate = 0;
+      try {
+        const active = downloadService.start(info, format, sponsorSegments, ({ bytesWritten, totalBytes }) => {
+          const now = Date.now();
+          if (now - lastUpdate < 250) return;
+          lastUpdate = now;
+          updateJob(youtubeId, { bytesWritten, totalBytes });
+        });
+        activeDownloadsRef.current[youtubeId] = active;
+
+        const saved = await active.promise;
+        try {
+          await persistDownloads([saved, ...downloadedVideosRef.current]);
+        } catch (err) {
+          // Don't leave an untracked file or a phantom list entry if the metadata could not be saved
+          downloadService.deleteFiles(saved);
+          downloadedVideosRef.current = downloadedVideosRef.current.filter((v) => v.id !== saved.id);
+          setDownloadedVideos(downloadedVideosRef.current);
+          throw err;
+        }
+        removeJob(youtubeId);
+      } catch (err) {
+        if (err instanceof DownloadCancelledError) {
+          removeJob(youtubeId);
+        } else {
+          updateJob(youtubeId, {
+            status: 'failed',
+            error: err instanceof Error ? err.message : 'Download failed',
+          });
+        }
+      } finally {
+        delete activeDownloadsRef.current[youtubeId];
+      }
+    })();
+  };
+
+  const cancelDownload = (youtubeId: string) => {
+    const active = activeDownloadsRef.current[youtubeId];
+    if (active) {
+      active.cancel();
+    } else {
+      pendingDownloadsRef.current.delete(youtubeId);
+      removeJob(youtubeId);
+    }
+  };
+
+  const dismissDownloadJob = (youtubeId: string) => removeJob(youtubeId);
+
+  const deleteDownloadedVideo = async (id: string) => {
+    const target = downloadedVideosRef.current.find((v) => v.id === id);
+    if (!target) return;
+    if (currentVideoRef.current?.id === id) handleSetPlayerMode('closed');
+    downloadService.deleteFiles(target);
+    await persistDownloads(downloadedVideosRef.current.filter((v) => v.id !== id));
+  };
+
+  const isYoutubeVideoDownloaded = (youtubeId: string) =>
+    downloadedVideos.some((v) => v.youtubeId === youtubeId);
+
+  const downloadedVideoItems = useMemo(() => downloadedVideos.map(downloadedToVideoItem), [downloadedVideos]);
+  const downloadJobs = useMemo(() => Object.values(jobsById), [jobsById]);
 
   // === TIMESTAMPED NOTES ===
   const addTimestampNote = async (noteText: string, customTime?: number) => {
@@ -393,41 +457,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       name,
       videoCount: firstVideo ? 1 : 0,
       videoIds: firstVideo ? [firstVideo.id] : [],
-      thumbnail: firstVideo ? firstVideo.thumbnail : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500',
-      createdAt: 'Just now',
+      thumbnail: firstVideo ? firstVideo.thumbnail : '',
+      createdAt: new Date().toISOString(),
     };
     const updated = await storageService.savePlaylist(newPlaylist);
     setPlaylists(updated);
-  };
-
-  // === CREATOR STUDIO UPLOAD & IMPORT ===
-  const uploadNewVideo = async (videoData: Omit<VideoItem, 'id' | 'views' | 'likes'>) => {
-    const newVideo: VideoItem = {
-      ...videoData,
-      id: `user-vid-${Date.now()}`,
-      views: '1',
-      likes: '1',
-      publishedAt: 'Just now',
-      durationSeconds: videoData.durationSeconds || 300,
-    };
-    const updated = await storageService.saveUserVideo(newVideo);
-    setUserUploadedVideos(updated);
-  };
-
-  const importYoutubeVideo = async (video: VideoItem) => {
-    const updated = await storageService.saveUserVideo(video);
-    setUserUploadedVideos(updated);
-    // Also save as download for offline availability
-    try {
-      await startDownload(video, '1080p');
-    } catch {
-      // Ignored if download fails
-    }
-  };
-
-  const deleteUserVideo = async (videoId: string) => {
-    const updated = await storageService.removeUserVideo(videoId);
-    setUserUploadedVideos(updated);
   };
 
   const toggleDeviceFrame = () => setIsDeviceFrameActive((prev) => !prev);
@@ -442,12 +476,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setTheme,
         activeTab,
         setActiveTab,
-        searchQuery,
-        setSearchQuery,
-        selectedCategory,
-        setSelectedCategory,
-        isSearchModalOpen,
-        setIsSearchModalOpen,
         currentVideo,
         playerMode,
         isPlaying,
@@ -459,6 +487,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         sleepTimerRemaining,
         sponsorSkipToast,
         playVideo,
+        playDownloadedVideo,
+        playDeviceVideo,
         pauseVideo,
         resumeVideo,
         setPlayerMode: handleSetPlayerMode,
@@ -469,10 +499,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setSleepTimer,
         triggerFrameStep,
         updateVideoProgress,
-        downloads,
+        registerPlayerController,
+        downloadedVideos,
+        downloadedVideoItems,
+        downloadJobs,
         startDownload,
-        removeDownload,
-        isDownloaded,
+        cancelDownload,
+        dismissDownloadJob,
+        deleteDownloadedVideo,
+        isYoutubeVideoDownloaded,
         notes,
         addTimestampNote,
         removeTimestampNote,
@@ -483,16 +518,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         clearHistory,
         playlists,
         createPlaylist,
-        shorts,
-        currentShortIndex,
-        setCurrentShortIndex,
-        studioAnalytics,
-        userUploadedVideos,
-        uploadNewVideo,
-        importYoutubeVideo,
-        deleteUserVideo,
-        apiSettings,
-        updateApiSettings,
         isDeviceFrameActive,
         toggleDeviceFrame,
       }}

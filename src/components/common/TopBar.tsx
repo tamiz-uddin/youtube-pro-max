@@ -1,10 +1,10 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Image, Platform } from 'react-native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { View, Text, StyleSheet, TouchableOpacity, Platform } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../../context/AppContext';
 
 export const TopBar: React.FC = () => {
-  const { colors, setIsSearchModalOpen, setActiveTab, toggleDeviceFrame, isDeviceFrameActive } = useApp();
+  const { colors, setActiveTab, toggleDeviceFrame, isDeviceFrameActive } = useApp();
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background, borderBottomColor: colors.divider }]}>
@@ -44,29 +44,11 @@ export const TopBar: React.FC = () => {
 
         <TouchableOpacity
           style={[styles.iconButton, { backgroundColor: colors.surface }]}
-          onPress={() => setIsSearchModalOpen(true)}
+          onPress={() => setActiveTab('download')}
           activeOpacity={0.7}
+          accessibilityLabel="Search YouTube to download"
         >
           <Ionicons name="search" size={20} color={colors.textPrimary} />
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.iconButton, { backgroundColor: colors.surface }]}
-          activeOpacity={0.7}
-        >
-          <Ionicons name="notifications-outline" size={20} color={colors.textPrimary} />
-          <View style={[styles.notificationDot, { backgroundColor: colors.accent }]} />
-        </TouchableOpacity>
-
-        {/* Profile Avatar -> Settings / Channel */}
-        <TouchableOpacity
-          onPress={() => setActiveTab('studio')}
-          activeOpacity={0.8}
-        >
-          <Image
-            source={{ uri: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop' }}
-            style={[styles.avatar, { borderColor: colors.accent }]}
-          />
         </TouchableOpacity>
       </View>
     </View>
@@ -132,19 +114,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
-  },
-  notificationDot: {
-    position: 'absolute',
-    top: 7,
-    right: 8,
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-  },
-  avatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    borderWidth: 1.5,
   },
 });

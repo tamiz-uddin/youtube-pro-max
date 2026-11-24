@@ -1,458 +1,277 @@
-import { VideoItem } from '../types';
+import { Innertube, Platform, Constants, Log, YT } from 'youtubei.js';
+import type { Types } from 'youtubei.js';
+import { SponsorSegment, VideoChapter } from '../types';
 
-export interface SearchOptions {
-  query: string;
-  category?: string;
-  apiKey?: string;
-  mode?: 'hybrid' | 'piped' | 'official';
+// Video data is fetched by the phone itself with YouTube.js (https://ytjs.dev), the same
+// approach NewPipe uses. Public Piped servers were dropped because YouTube blocks them.
+
+// Deciphering stream URLs runs YouTube's player code, which YouTube.js asks the host to evaluate.
+Platform.shim.eval = async (data: Types.BuildScriptResult) => new Function(data.output)();
+Log.setLevel(Log.Level.NONE);
+
+// Clients that return combined audio+video files a plain HTTP download can fetch.
+// Each URL only works when downloaded with the same client's User-Agent.
+const STREAM_CLIENTS = ['ANDROID', 'ANDROID_VR'] as const;
+type StreamClient = (typeof STREAM_CLIENTS)[number];
+
+export interface YouTubeSearchResult {
+  youtubeId: string;
+  title: string;
+  thumbnail: string;
+  channelTitle: string;
+  channelVerified: boolean;
+  durationSeconds: number;
+  views: number | null;
+  uploadedDate: string;
 }
 
-export interface DislikeStats {
-  likes: number;
-  dislikes: number;
-  viewCount: number;
-  rating: number;
+export interface DownloadFormat {
+  id: string;
+  label: string;
+  url: string;
+  headers: Record<string, string>;
+  mimeType: string;
+  extension: string;
+  isAudioOnly: boolean;
+  sizeBytes: number | null;
 }
 
-const PIPED_MIRRORS = [
-  'https://api.piped.private.coffee',
-  'https://piped-api.garudalinux.org',
-  'https://pipedapi.tokhmi.xyz',
-];
+export interface YouTubeVideoInfo {
+  youtubeId: string;
+  title: string;
+  description: string;
+  thumbnail: string;
+  channelTitle: string;
+  channelAvatar: string;
+  channelVerified: boolean;
+  channelSubscribers: number | null;
+  views: number | null;
+  likes: number | null;
+  dislikes: number | null;
+  uploadDate: string;
+  durationSeconds: number;
+  category: string;
+  tags: string[];
+  chapters: VideoChapter[];
+  formats: DownloadFormat[];
+}
+
+const ID_PATTERN = /^[a-zA-Z0-9_-]{11}$/;
+
+let clientPromise: Promise<Innertube> | null = null;
+
+/** One shared session. retrieve_player loads the player code needed to decipher URLs. */
+const getClient = (): Promise<Innertube> => {
+  if (!clientPromise) {
+    clientPromise = Innertube.create({ retrieve_player: true }).catch((err) => {
+      clientPromise = null;
+      throw err;
+    });
+  }
+  return clientPromise;
+};
+
+const formatClock = (seconds: number) => {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+};
+
+/** "275,983 views" → 275983, "15.8M subscribers" → 15800000 */
+const parseCount = (text: unknown): number | null => {
+  if (typeof text === 'number') return Number.isFinite(text) ? text : null;
+  if (typeof text !== 'string') return null;
+  const match = text.replace(/,/g, '').match(/([\d.]+)\s*([KMB])?/i);
+  if (!match) return null;
+  const n = parseFloat(match[1]);
+  const mult = { K: 1e3, M: 1e6, B: 1e9 }[(match[2] || '').toUpperCase() as 'K' | 'M' | 'B'] ?? 1;
+  return Number.isFinite(n) ? Math.round(n * mult) : null;
+};
+
+const textOf = (value: unknown): string => (value ? String(value) : '');
+
+const describeError = (err: unknown): string => {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/not a bot|LOGIN_REQUIRED|Sign in to confirm/i.test(message)) {
+    return 'YouTube asked to confirm you are not a bot. Wait a while and try again, or try another network.';
+  }
+  if (/Network request failed|fetch failed|timed? ?out/i.test(message)) {
+    return 'Could not reach YouTube. Check your internet connection.';
+  }
+  return message || 'Something went wrong while contacting YouTube.';
+};
+
+async function collectFormats(info: YT.VideoInfo, yt: Innertube, client: StreamClient): Promise<DownloadFormat[]> {
+  const headers = { 'User-Agent': Constants.CLIENTS[client].USER_AGENT };
+  const streaming = info.streaming_data;
+  if (!streaming) return [];
+
+  const muxed = streaming.formats.filter((f) => f.mime_type.startsWith('video/mp4'));
+  // Best AAC track; M4A plays on Android and iOS, WebM/Opus does not play on iOS.
+  const audio = streaming.adaptive_formats
+    .filter((f) => f.has_audio && !f.has_video && f.mime_type.startsWith('audio/mp4'))
+    .filter((f) => !f.audio_track || f.audio_track.audio_is_default)
+    .sort((a, b) => b.bitrate - a.bitrate)
+    .slice(0, 1);
+
+  const formats: DownloadFormat[] = [];
+  for (const f of [...muxed, ...audio]) {
+    let url: string;
+    try {
+      url = await f.decipher(yt.session.player);
+    } catch {
+      continue; // Some clients return formats without a usable URL
+    }
+    const isAudioOnly = !f.has_video;
+    formats.push({
+      id: `${client}-${f.itag}`,
+      label: isAudioOnly ? `Audio only ${Math.round(f.bitrate / 1000)} kbps` : `${f.quality_label || f.quality} video`,
+      url,
+      headers,
+      mimeType: f.mime_type,
+      extension: isAudioOnly ? 'm4a' : 'mp4',
+      isAudioOnly,
+      sizeBytes: f.content_length && f.content_length > 0 ? f.content_length : null,
+    });
+  }
+  return formats;
+}
 
 export const youtubeService = {
   /**
-   * Extract YouTube Video ID from any link format:
-   * - https://www.youtube.com/watch?v=dQw4w9WgXcQ
-   * - https://youtu.be/dQw4w9WgXcQ
-   * - https://www.youtube.com/shorts/dQw4w9WgXcQ
-   * - https://youtube.com/embed/dQw4w9WgXcQ
+   * Extract the 11-character video ID from a YouTube link or a bare ID:
+   * youtube.com/watch?v=, youtu.be/, /shorts/, /embed/, /live/, m.youtube.com, music.youtube.com
    */
-  extractVideoId(url: string): string | null {
-    if (!url) return null;
-    const clean = url.trim();
-    const regex = /(?:youtu\.be\/|youtube\.com\/(?:watch\?.*v=|embed\/|shorts\/|v\/))([a-zA-Z0-9_-]{11})/;
-    const match = clean.match(regex);
-    if (match && match[1]) {
-      return match[1];
-    }
-    const stripped = clean
-      .replace('yt-import-', '')
-      .replace('yt-live-', '')
-      .replace('piped-', '')
-      .replace('trend-', '')
-      .replace('search-', '');
-    if (/^[a-zA-Z0-9_-]{11}$/.test(stripped)) {
-      return stripped;
-    }
-    return null;
+  extractVideoId(input: string): string | null {
+    if (!input) return null;
+    const clean = input.trim();
+    if (ID_PATTERN.test(clean)) return clean;
+    const match = clean.match(
+      /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/|v\/))([a-zA-Z0-9_-]{11})/
+    );
+    return match ? match[1] : null;
   },
 
-  /**
-   * Extract real stream URL for a given YouTube Video ID from Piped mirrors.
-   * Never returns dummy videos. Returns null if no live stream is available.
-   */
-  async getStreamUrl(videoId: string): Promise<string | null> {
-    const cleanId = videoId
-      .replace('yt-import-', '')
-      .replace('yt-live-', '')
-      .replace('piped-', '')
-      .replace('trend-', '')
-      .replace('search-', '');
-
-    for (const mirror of PIPED_MIRRORS) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 4500);
-        const res = await fetch(`${mirror}/streams/${cleanId}`, { signal: controller.signal });
-        clearTimeout(timer);
-
-        if (res.ok) {
-          const data = await res.json();
-          // 1. Look for combined audio/video MP4 stream
-          if (data.videoStreams && Array.isArray(data.videoStreams)) {
-            const comboMp4 = data.videoStreams.find(
-              (s: any) => !s.videoOnly && s.url && (s.mimeType?.includes('mp4') || s.format === 'MPEG_4')
-            );
-            if (comboMp4?.url) return comboMp4.url;
-
-            const anyCombo = data.videoStreams.find((s: any) => !s.videoOnly && s.url);
-            if (anyCombo?.url) return anyCombo.url;
-          }
-          // 2. Look for HLS stream
-          if (data.hls) return data.hls;
-          // 3. Fallback to first video stream with URL
-          if (data.videoStreams && data.videoStreams[0]?.url) {
-            return data.videoStreams[0].url;
-          }
-        }
-      } catch {
-        // try next mirror
-      }
-    }
-    return null;
-  },
-
-  /**
-   * Resolve any YouTube link into a rich VideoItem using zero-key oEmbed + Dislike API + Piped Streams.
-   * Never assigns dummy videos: uses real stream or leaves empty for user.
-   */
-  async resolveYoutubeUrl(url: string): Promise<VideoItem | null> {
-    const videoId = this.extractVideoId(url);
-    if (!videoId) return null;
-
+  async searchVideos(query: string): Promise<YouTubeSearchResult[]> {
+    const q = query.trim();
+    if (!q) return [];
     try {
-      let title = `YouTube Video (${videoId})`;
-      let channelTitle = 'YouTube Creator';
-      let thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-      let duration = '00:00';
-      let durationSeconds = 0;
-      let description = `Imported YouTube video: https://youtube.com/watch?v=${videoId}`;
-      let realStreamUrl = '';
-
-      // 1. Query Piped for real stream and rich metadata
-      for (const mirror of PIPED_MIRRORS) {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 4500);
-          const res = await fetch(`${mirror}/streams/${videoId}`, { signal: controller.signal });
-          clearTimeout(timer);
-
-          if (res.ok) {
-            const data = await res.json();
-            if (data.title) title = data.title;
-            if (data.uploader) channelTitle = data.uploader;
-            if (data.description) description = data.description;
-            if (data.thumbnailUrl) thumbnail = data.thumbnailUrl;
-            if (data.duration) {
-              durationSeconds = data.duration;
-              duration = `${Math.floor(data.duration / 60)}:${(data.duration % 60).toString().padStart(2, '0')}`;
-            }
-
-            if (data.videoStreams && Array.isArray(data.videoStreams)) {
-              const comboMp4 = data.videoStreams.find(
-                (s: any) => !s.videoOnly && s.url && (s.mimeType?.includes('mp4') || s.format === 'MPEG_4')
-              );
-              if (comboMp4?.url) {
-                realStreamUrl = comboMp4.url;
-              } else {
-                const anyCombo = data.videoStreams.find((s: any) => !s.videoOnly && s.url);
-                if (anyCombo?.url) realStreamUrl = anyCombo.url;
-              }
-            }
-            if (!realStreamUrl && data.hls) {
-              realStreamUrl = data.hls;
-            }
-            if (realStreamUrl) break;
-          }
-        } catch {
-          // next mirror
-        }
-      }
-
-      // 2. If title or thumbnail not resolved from stream API, fetch oEmbed metadata
-      if (title === `YouTube Video (${videoId})`) {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 3500);
-          const oembedRes = await fetch(
-            `https://noembed.com/embed?url=https://www.youtube.com/watch?v=${videoId}`,
-            { signal: controller.signal }
-          );
-          clearTimeout(timer);
-          if (oembedRes.ok) {
-            const oembed = await oembedRes.json();
-            if (oembed.title) title = oembed.title;
-            if (oembed.author_name) channelTitle = oembed.author_name;
-            if (oembed.thumbnail_url) thumbnail = oembed.thumbnail_url;
-          }
-        } catch {}
-      }
-
-      // 3. Fetch real Return YouTube Dislike & like count
-      const dislikeStats = await this.getDislikeStats(videoId);
-
-      const videoItem: VideoItem = {
-        id: `yt-import-${videoId}`,
-        title,
-        description,
-        thumbnail,
-        videoUrl: realStreamUrl, // Real stream or empty — NO DUMMY FALLBACKS!
-        channelTitle,
-        channelAvatar: `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120`,
-        channelSubscribers: 'YouTube Creator',
-        channelVerified: true,
-        views: dislikeStats?.viewCount ? `${Math.floor(dislikeStats.viewCount / 1000)}K` : '100K',
-        publishedAt: 'Imported',
-        duration: duration !== '00:00' ? duration : '05:00',
-        durationSeconds: durationSeconds || 300,
-        category: 'Imported',
-        likes: dislikeStats?.likes ? `${Math.floor(dislikeStats.likes / 1000)}K` : '10K',
-        dislikes: dislikeStats?.dislikes ? `${Math.floor(dislikeStats.dislikes / 1000)}K` : '500',
-        comments: [
-          {
-            id: `c-imp-${Date.now()}`,
-            author: 'Pro Max Hub',
-            avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120',
-            text: 'Imported successfully into YouTube Pro Max! 🚀',
-            likes: 5,
-            timeAgo: 'Just now',
-          },
-        ],
-      };
-
-      return videoItem;
+      const yt = await getClient();
+      const results = await yt.search(q, { type: 'video' });
+      return results.videos
+        .filter((node): node is YT.Search['videos'][number] & { type: 'Video' } => node.type === 'Video')
+        .map((node) => {
+          const v = node as any;
+          return {
+            youtubeId: v.video_id ?? v.id,
+            title: textOf(v.title) || 'Untitled video',
+            thumbnail: v.thumbnails?.[0]?.url ?? '',
+            channelTitle: v.author?.name ?? '',
+            channelVerified: !!(v.author?.is_verified || v.author?.is_verified_artist),
+            durationSeconds: v.duration?.seconds ?? 0,
+            views: parseCount(textOf(v.view_count)),
+            uploadedDate: textOf(v.published),
+          };
+        })
+        .filter((item) => ID_PATTERN.test(item.youtubeId));
     } catch (err) {
-      console.warn('Failed to resolve YouTube URL:', err);
-      return null;
+      throw new Error(describeError(err));
     }
   },
 
   /**
-   * Fetch Return YouTube Dislike stats for real like/dislike counts
+   * Full metadata plus the formats that can be saved as a single playable file.
+   * YouTube only serves combined audio+video files at low resolutions (usually 360p);
+   * higher resolutions are video-only and would need merging with a separate audio track.
    */
-  async getDislikeStats(videoId: string): Promise<DislikeStats | null> {
+  async getVideoInfo(youtubeId: string): Promise<YouTubeVideoInfo> {
+    let yt: Innertube;
     try {
-      const cleanId = videoId
-        .replace('yt-import-', '')
-        .replace('yt-live-', '')
-        .replace('piped-', '')
-        .replace('yt-promax-', '');
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2500);
+      yt = await getClient();
+    } catch (err) {
+      throw new Error(describeError(err));
+    }
 
-      const res = await fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${cleanId}`, {
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-
-      if (res.ok) {
-        const data = await res.json();
-        return {
-          likes: data.likes || 0,
-          dislikes: data.dislikes || 0,
-          viewCount: data.viewCount || 0,
-          rating: data.rating || 5,
-        };
-      }
+    // Likes, upload date, subscribers, chapters and the full description come from the web watch page.
+    // Best-effort: the download still works if this part fails.
+    let full: YT.VideoInfo | null = null;
+    try {
+      full = await yt.getInfo(youtubeId);
     } catch {
-      // Return null on failure
+      full = null;
     }
-    return null;
+
+    let lastProblem = 'No downloadable format was offered for this video.';
+    for (const client of STREAM_CLIENTS) {
+      let basic: YT.VideoInfo;
+      try {
+        basic = await yt.getBasicInfo(youtubeId, { client });
+      } catch (err) {
+        lastProblem = describeError(err);
+        continue;
+      }
+      const playability = basic.playability_status;
+      if (playability?.status !== 'OK') {
+        lastProblem = describeError(playability?.reason || `Video is ${playability?.status?.toLowerCase()}`);
+        continue;
+      }
+      const formats = await collectFormats(basic, yt, client);
+      if (formats.length === 0) continue;
+
+      const b = basic.basic_info;
+      const owner = full?.secondary_info?.owner;
+      const markers = (full?.player_overlays as any)?.decorated_player_bar?.player_bar?.markers_map ?? [];
+      const rawChapters: any[] = markers.find((m: any) => m?.value?.chapters)?.value?.chapters ?? [];
+
+      return {
+        youtubeId,
+        title: b.title || youtubeId,
+        description: textOf(full?.secondary_info?.description) || b.short_description || '',
+        thumbnail: b.thumbnail?.[0]?.url ?? '',
+        channelTitle: b.author || owner?.author?.name || '',
+        channelAvatar: owner?.author?.thumbnails?.[0]?.url ?? '',
+        channelVerified: !!(owner?.author?.is_verified || owner?.author?.is_verified_artist),
+        channelSubscribers: parseCount(textOf(owner?.subscriber_count)),
+        views: b.view_count ?? null,
+        likes: full?.basic_info.like_count ?? null,
+        // YouTube no longer publishes dislike counts
+        dislikes: null,
+        uploadDate: textOf(full?.primary_info?.published),
+        durationSeconds: b.duration ?? 0,
+        category: full?.basic_info.category ?? b.category ?? '',
+        tags: b.keywords ?? full?.basic_info.keywords ?? [],
+        chapters: rawChapters.map((c) => {
+          const start = Math.floor((c.time_range_start_millis ?? 0) / 1000);
+          return { title: textOf(c.title), timestamp: start, timeFormatted: formatClock(start) };
+        }),
+        formats,
+      };
+    }
+    throw new Error(lastProblem);
   },
 
-  /**
-   * Fetch real SponsorBlock segments to auto-skip promotional sections
-   */
-  async getSponsorSegments(videoId: string): Promise<{ start: number; end: number }[]> {
+  /** SponsorBlock segments, saved with the download so skipping works offline. */
+  async getSponsorSegments(youtubeId: string): Promise<SponsorSegment[]> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
     try {
-      const cleanId = videoId
-        .replace('yt-import-', '')
-        .replace('yt-live-', '')
-        .replace('piped-', '')
-        .replace('yt-promax-', '');
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2500);
-
+      const categories = encodeURIComponent('["sponsor","intro","outro","selfpromo"]');
       const res = await fetch(
-        `https://sponsor.ajay.app/api/skipSegments?videoID=${cleanId}&categories=["sponsor","intro","outro","selfpromo"]`,
+        `https://sponsor.ajay.app/api/skipSegments?videoID=${youtubeId}&categories=${categories}`,
         { signal: controller.signal }
       );
-      clearTimeout(timer);
-
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          return data.map((seg: any) => ({
-            start: Math.floor(seg.segment[0]),
-            end: Math.ceil(seg.segment[1]),
-          }));
-        }
-      }
+      // 404 means no segments for this video.
+      if (!res.ok) return [];
+      const data = await res.json();
+      if (!Array.isArray(data)) return [];
+      return data.map((seg: any) => ({
+        start: Math.floor(seg.segment[0]),
+        end: Math.ceil(seg.segment[1]),
+      }));
     } catch {
-      // No segments
-    }
-    return [];
-  },
-
-  /**
-   * Fetch real live trending videos from Piped.
-   * If offline or empty, returns [] — never returns dummy videos.
-   */
-  async getTrendingVideos(): Promise<VideoItem[]> {
-    for (const mirror of PIPED_MIRRORS) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 3500);
-
-        const res = await fetch(`${mirror}/trending?region=US`, { signal: controller.signal });
-        clearTimeout(timer);
-
-        if (res.ok) {
-          const items = await res.json();
-          if (Array.isArray(items) && items.length > 0) {
-            return items.slice(0, 15).map((item: any, idx: number) => {
-              const videoId = item.url ? item.url.replace('/watch?v=', '') : `trend-${idx}`;
-              return {
-                id: videoId,
-                title: item.title || 'Trending Video',
-                description: item.shortDescription || `Trending on YouTube #${idx + 1}`,
-                thumbnail: item.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-                videoUrl: '', // Resolved on demand when user plays the video
-                channelTitle: item.uploaderName || 'YouTube Creator',
-                channelAvatar: item.uploaderAvatar || `https://images.unsplash.com/photo-${1535713875002 + idx}?w=120`,
-                channelSubscribers: 'Verified Channel',
-                channelVerified: item.uploaderVerified ?? true,
-                views: item.views ? `${Math.floor(item.views / 1000)}K` : '250K',
-                publishedAt: item.uploadedDate || 'Trending today',
-                duration: item.duration
-                  ? `${Math.floor(item.duration / 60)}:${(item.duration % 60).toString().padStart(2, '0')}`
-                  : '04:15',
-                durationSeconds: item.duration || 255,
-                category: 'Trending',
-                likes: '120K',
-                dislikes: '1.1K',
-                sponsorSegments: [{ start: 60, end: 75 }],
-              };
-            });
-          }
-        }
-      } catch {
-        // Try next mirror
-      }
-    }
-    return [];
-  },
-
-  /**
-   * Search for videos across Piped -> Google Official.
-   * If no results, returns [] — never returns dummy videos.
-   */
-  async searchVideos(options: SearchOptions): Promise<VideoItem[]> {
-    const { query, category, apiKey, mode = 'hybrid' } = options;
-    const cleanQuery = query.trim().toLowerCase();
-
-    // 1. Official YouTube Data API v3 if supplied
-    if (mode === 'official' && apiKey && cleanQuery) {
-      try {
-        const response = await fetch(
-          `https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=12&q=${encodeURIComponent(
-            query
-          )}&type=video&key=${apiKey}`
-        );
-        if (response.ok) {
-          const data = await response.json();
-          if (data.items && data.items.length > 0) {
-            return data.items.map((item: any, idx: number) => ({
-              id: item.id?.videoId || `yt-live-${idx}`,
-              title: item.snippet?.title || 'YouTube Video',
-              description: item.snippet?.description || '',
-              thumbnail: item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.medium?.url,
-              videoUrl: '', // Resolved dynamically when played
-              channelTitle: item.snippet?.channelTitle || 'YouTube Creator',
-              channelAvatar: `https://images.unsplash.com/photo-${1535713875002 + idx}?w=120`,
-              channelSubscribers: '1.2M',
-              channelVerified: true,
-              views: `${Math.floor(Math.random() * 900 + 100)}K`,
-              publishedAt: item.snippet?.publishedAt?.slice(0, 10) || 'Recently',
-              duration: '10:25',
-              durationSeconds: 625,
-              category: category || 'General',
-              likes: '24K',
-            }));
-          }
-        }
-      } catch {
-        // Fall back
-      }
-    }
-
-    // 2. Try fast Piped live search
-    if (cleanQuery) {
-      for (const mirror of PIPED_MIRRORS) {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 3500);
-
-          const res = await fetch(`${mirror}/search?q=${encodeURIComponent(query)}&filter=videos`, {
-            signal: controller.signal,
-          });
-          clearTimeout(timer);
-
-          if (res.ok) {
-            const data = await res.json();
-            if (data.items && Array.isArray(data.items) && data.items.length > 0) {
-              return data.items.slice(0, 15).map((item: any, idx: number) => {
-                const videoId = item.url ? item.url.replace('/watch?v=', '') : `search-${idx}`;
-                return {
-                  id: videoId,
-                  title: item.title || query,
-                  description: item.shortDescription || '',
-                  thumbnail: item.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-                  videoUrl: '', // Resolved dynamically when played
-                  channelTitle: item.uploaderName || 'Creator',
-                  channelAvatar: item.uploaderAvatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120',
-                  channelSubscribers: '850K',
-                  channelVerified: item.uploaderVerified ?? true,
-                  views: item.views ? `${Math.floor(item.views / 1000)}K` : '150K',
-                  publishedAt: item.uploadedDate || 'Recently',
-                  duration: item.duration
-                    ? `${Math.floor(item.duration / 60)}:${(item.duration % 60).toString().padStart(2, '0')}`
-                    : '08:45',
-                  durationSeconds: item.duration || 525,
-                  category: category || 'Search Result',
-                  likes: '45K',
-                };
-              });
-            }
-          }
-        } catch {
-          // Next mirror
-        }
-      }
-    }
-
-    // Return empty list if no results — no dummy videos
-    return [];
-  },
-
-  /**
-   * Get search auto-complete suggestions from Google's official public YouTube suggestion endpoint
-   */
-  async getSuggestions(query: string): Promise<string[]> {
-    const q = query.trim().toLowerCase();
-    const defaults = [
-      'Pro Max HDR Video Showcase',
-      'Quantum Computing Architecture',
-      'Cyberpunk 2077 RTX 5090 Ray Tracing',
-      'Lofi Hip Hop chill beats 24/7',
-      'SpaceX Starship orbital flight',
-    ];
-
-    if (!q) return defaults;
-
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2000);
-
-      const res = await fetch(
-        `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${encodeURIComponent(
-          q
-        )}`,
-        { signal: controller.signal }
-      );
+      return [];
+    } finally {
       clearTimeout(timer);
-
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data) && Array.isArray(data[1]) && data[1].length > 0) {
-          return data[1].slice(0, 8);
-        }
-      }
-    } catch {
-      // Fallback
     }
-
-    return defaults.filter((item) => item.toLowerCase().includes(q)).slice(0, 5);
   },
 };

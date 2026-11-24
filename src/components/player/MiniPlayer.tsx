@@ -25,7 +25,10 @@ export const MiniPlayer: React.FC = () => {
         onPress={() => setPlayerMode('full')}
         activeOpacity={0.9}
       >
-        <Image source={{ uri: currentVideo.thumbnail }} style={styles.thumbnail} />
+        <Image
+          source={currentVideo.thumbnail ? { uri: currentVideo.thumbnail } : undefined}
+          style={[styles.thumbnail, { backgroundColor: colors.surfaceSubtle }]}
+        />
 
         <View style={styles.infoWrapper}>
           <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>

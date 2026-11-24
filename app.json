@@ -25,7 +25,17 @@
     },
     "plugins": [
       "expo-video",
-      "expo-font"
+      "expo-font",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to show and play the videos on this device.",
+          "savePhotosPermission": false,
+          "granularPermissions": [
+            "video"
+          ]
+        }
+      ]
     ]
   }
 }

@@ -1,14 +1,12 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import React from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
 import { AppTheme } from '../types';
+import { formatBytes } from '../utils/videoFormat';
 
 export const SettingsScreen: React.FC = () => {
-  const { colors, theme, setTheme, apiSettings, updateApiSettings, downloads } = useApp();
-  const [apiKeyInput, setApiKeyInput] = useState(apiSettings.apiKey || '');
-  const [apiKeySavedNotice, setApiKeySavedNotice] = useState(false);
-  const [sponsorBlockEnabled, setSponsorBlockEnabled] = useState(true);
+  const { colors, theme, setTheme, downloadedVideos } = useApp();
 
   const themeOptions: { id: AppTheme; label: string; desc: string; iconColor: string }[] = [
     { id: 'oled-black', label: 'OLED Pitch Black', desc: 'Zero pixel power, YouTube Red glow', iconColor: '#FF0033' },
@@ -16,21 +14,7 @@ export const SettingsScreen: React.FC = () => {
     { id: 'pro-gold', label: 'Pro Obsidian Gold', desc: 'Luxury Amber & 24K Gold accents', iconColor: '#F59E0B' },
   ];
 
-  const handleSaveApiKey = async () => {
-    await updateApiSettings({
-      ...apiSettings,
-      apiKey: apiKeyInput.trim(),
-    });
-    setApiKeySavedNotice(true);
-    setTimeout(() => setApiKeySavedNotice(false), 2500);
-  };
-
-  const handleSetApiMode = async (mode: 'hybrid' | 'piped' | 'official') => {
-    await updateApiSettings({
-      ...apiSettings,
-      mode,
-    });
-  };
+  const totalBytes = downloadedVideos.reduce((sum, v) => sum + v.fileSizeBytes, 0);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -80,119 +64,28 @@ export const SettingsScreen: React.FC = () => {
           })}
         </View>
 
-        {/* DATA SOURCES & HYBRID PIPELINE */}
-        <Text style={[styles.sectionHeading, { color: colors.textSecondary, marginTop: 18 }]}>
-          HYBRID DATA PIPELINE & API
-        </Text>
-        <View style={[styles.apiCard, { backgroundColor: colors.surface, borderColor: colors.cardBorder }]}>
-          <Text style={[styles.apiCardTitle, { color: colors.textPrimary }]}>YouTube Data Provider</Text>
-          <Text style={[styles.apiCardDesc, { color: colors.textMuted }]}>
-            Choose where live video search results, channel metrics, and recommendations are sourced from.
-          </Text>
-
-          <View style={styles.apiModeRow}>
-            {[
-              { id: 'hybrid', label: '⚡ Hybrid (Auto)' },
-              { id: 'piped', label: '🌐 Free Piped' },
-              { id: 'official', label: '🔑 Official v3' },
-            ].map((m) => {
-              const active = apiSettings.mode === m.id;
-              return (
-                <TouchableOpacity
-                  key={m.id}
-                  style={[
-                    styles.apiModeBtn,
-                    {
-                      backgroundColor: active ? colors.accent : colors.surfaceSubtle,
-                    },
-                  ]}
-                  onPress={() => handleSetApiMode(m.id as any)}
-                >
-                  <Text style={[styles.apiModeBtnText, { color: active ? '#FFFFFF' : colors.textSecondary }]}>
-                    {m.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          {/* Optional API key input */}
-          {apiSettings.mode === 'official' && (
-            <View style={styles.apiKeySection}>
-              <Text style={[styles.apiKeyLabel, { color: colors.textSecondary }]}>
-                GOOGLE CLOUD YOUTUBE API KEY
-              </Text>
-              <TextInput
-                style={[styles.apiKeyInput, { backgroundColor: colors.surfaceSubtle, color: colors.textPrimary }]}
-                placeholder="AIzaSy..."
-                placeholderTextColor={colors.textMuted}
-                value={apiKeyInput}
-                onChangeText={setApiKeyInput}
-                autoCapitalize="none"
-              />
-              <TouchableOpacity
-                style={[styles.saveKeyBtn, { backgroundColor: colors.accent }]}
-                onPress={handleSaveApiKey}
-              >
-                <Text style={styles.saveKeyBtnText}>Save API Key</Text>
-              </TouchableOpacity>
-              {apiKeySavedNotice && (
-                <Text style={styles.savedNoticeText}>✅ API Key saved to local secure store!</Text>
-              )}
-            </View>
-          )}
-        </View>
-
-        {/* PRO MAX POWER TOGGLES */}
-        <Text style={[styles.sectionHeading, { color: colors.textSecondary, marginTop: 18 }]}>
-          PRO MAX POWER ENGINE
-        </Text>
-
-        {/* SponsorBlock Auto-Skip */}
-        <TouchableOpacity
-          style={[styles.toggleSettingRow, { backgroundColor: colors.surface, borderColor: colors.cardBorder }]}
-          onPress={() => setSponsorBlockEnabled(!sponsorBlockEnabled)}
-          activeOpacity={0.8}
-        >
-          <View style={styles.toggleSettingLeft}>
-            <View style={[styles.toggleIconWrap, { backgroundColor: 'rgba(245, 158, 11, 0.15)' }]}>
-              <Ionicons name="flash" size={16} color="#F59E0B" />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.toggleTitle, { color: colors.textPrimary }]}>Auto-Skip Sponsor Segments</Text>
-              <Text style={[styles.toggleDesc, { color: colors.textMuted }]}>
-                SponsorBlock integration automatically skips promotions
-              </Text>
-            </View>
-          </View>
-          <Ionicons
-            name={sponsorBlockEnabled ? 'toggle' : 'toggle-outline'}
-            size={28}
-            color={sponsorBlockEnabled ? colors.accent : colors.textMuted}
-          />
-        </TouchableOpacity>
-
-        {/* Permanent Offline Status */}
-        <View style={[styles.toggleSettingRow, { backgroundColor: colors.surface, borderColor: colors.cardBorder, marginTop: 8 }]}>
+        {/* STORAGE */}
+        <Text style={[styles.sectionHeading, { color: colors.textSecondary, marginTop: 18 }]}>STORAGE</Text>
+        <View style={[styles.toggleSettingRow, { backgroundColor: colors.surface, borderColor: colors.cardBorder }]}>
           <View style={styles.toggleSettingLeft}>
             <View style={[styles.toggleIconWrap, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
-              <MaterialCommunityIcons name="infinity" size={18} color="#10B981" />
+              <Ionicons name="folder-open" size={16} color="#10B981" />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.toggleTitle, { color: colors.textPrimary }]}>Permanent Vault Guarantee</Text>
+              <Text style={[styles.toggleTitle, { color: colors.textPrimary }]}>Downloaded videos</Text>
               <Text style={[styles.toggleDesc, { color: colors.textMuted }]}>
-                Auto-delete disabled: {downloads.length} videos stored permanently
+                {downloadedVideos.length} {downloadedVideos.length === 1 ? 'video' : 'videos'} •{' '}
+                {formatBytes(totalBytes)}. Kept in app storage until you delete them or uninstall the app.
               </Text>
             </View>
           </View>
-          <Ionicons name="checkmark-circle" size={20} color="#10B981" />
         </View>
 
         {/* App Version Info */}
         <View style={styles.versionFooter}>
           <Text style={[styles.versionName, { color: colors.textPrimary }]}>YouTube Pro Max</Text>
           <Text style={[styles.versionTag, { color: colors.textMuted }]}>
-            v2.0.0 Ultra Mobile Edition • React Native Expo
+            Offline video player • React Native Expo
           </Text>
         </View>
       </ScrollView>

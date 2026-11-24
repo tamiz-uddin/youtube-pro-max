@@ -1,20 +1,9 @@
-export type QualityOption = '1080p' | '720p' | '480p' | 'audio_only';
-
 export type AppTheme = 'oled-black' | 'cyber-neon' | 'pro-gold';
 
 export interface VideoChapter {
   title: string;
   timestamp: number; // in seconds
   timeFormatted: string;
-}
-
-export interface VideoComment {
-  id: string;
-  author: string;
-  avatar: string;
-  text: string;
-  likes: number;
-  timeAgo: string;
 }
 
 export interface VideoItem {
@@ -35,22 +24,9 @@ export interface VideoItem {
   likes: string;
   dislikes?: string;
   chapters?: VideoChapter[];
-  comments?: VideoComment[];
-  isShort?: boolean;
   sponsorSegments?: { start: number; end: number }[];
-}
-
-export interface ShortItem {
-  id: string;
-  title: string;
-  videoUrl: string;
-  channelTitle: string;
-  channelAvatar: string;
-  likes: string;
-  commentsCount: string;
-  soundTitle: string;
-  soundArtist: string;
-  tags: string[];
+  // Where the video came from: a downloaded YouTube video or a file already on the device.
+  source?: 'download' | 'device';
 }
 
 export interface TimestampNote {
@@ -61,20 +37,6 @@ export interface TimestampNote {
   timeFormatted: string;
   noteText: string;
   createdAt: string;
-}
-
-export interface OfflineDownload {
-  id: string;
-  videoId: string;
-  title: string;
-  thumbnail: string;
-  videoUrl: string;
-  quality: QualityOption;
-  fileSizeMb: number;
-  downloadedAt: string;
-  isPermanent: boolean; // GUARANTEE: Never auto-deletes!
-  channelTitle: string;
-  duration: string;
 }
 
 export interface Playlist {
@@ -97,13 +59,46 @@ export interface VideoFilterSettings {
   vocalEnhance: boolean; // default false
 }
 
-export interface StudioAnalytics {
-  views28d: number;
-  viewsGrowth: number;
-  watchTimeHours: number;
-  subscribers: number;
-  subscribersGrowth: number;
-  estimatedRevenue: number;
-  ctrPercent: number;
-  viewsHistory: { day: string; views: number }[];
+
+export interface SponsorSegment {
+  start: number;
+  end: number;
+}
+
+// A YouTube video saved to app storage, with the metadata collected at download time.
+export interface DownloadedVideo {
+  id: string;
+  youtubeId: string;
+  title: string;
+  description: string;
+  channelTitle: string;
+  channelVerified: boolean;
+  channelSubscribers: number | null;
+  views: number | null;
+  likes: number | null;
+  dislikes: number | null;
+  uploadDate: string;
+  durationSeconds: number;
+  category: string;
+  tags: string[];
+  chapters: VideoChapter[];
+  sponsorSegments: SponsorSegment[];
+  fileUri: string;
+  thumbnailUri: string;
+  channelAvatarUri: string;
+  fileSizeBytes: number;
+  quality: string;
+  mimeType: string;
+  isAudioOnly: boolean;
+  downloadedAt: string;
+}
+
+// A video found on the device's media library.
+export interface DeviceVideo {
+  id: string;
+  filename: string;
+  durationSeconds: number;
+  width: number | null;
+  height: number | null;
+  createdAt: number | null;
 }

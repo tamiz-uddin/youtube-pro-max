@@ -10,7 +10,7 @@ import {
   useWindowDimensions,
   Platform,
   Animated,
-  TextInput,
+  ActivityIndicator,
   PanResponder,
   Share,
   StatusBar as RNStatusBar,
@@ -19,16 +19,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import { WebView } from 'react-native-webview';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useApp } from '../../context/AppContext';
-import { youtubeService } from '../../services/youtubeService';
 import { VideoEnhancerModal } from './VideoEnhancerModal';
 import { ABLoopModal } from './ABLoopModal';
 import { SleepTimerModal } from './SleepTimerModal';
-import { DownloadModal } from './DownloadModal';
 import { NotesModal } from './NotesModal';
-import { VideoAIAssistant } from '../ai/VideoAIAssistant';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -54,9 +50,9 @@ export const ProMaxPlayer: React.FC = () => {
     colors,
     toggleLike,
     isLiked,
-    isDownloaded,
     playVideo,
-    userUploadedVideos,
+    downloadedVideoItems,
+    registerPlayerController,
   } = useApp();
 
   const insets = useSafeAreaInsets();
@@ -70,20 +66,12 @@ export const ProMaxPlayer: React.FC = () => {
   const [showEnhancerModal, setShowEnhancerModal] = useState(false);
   const [showABLoopModal, setShowABLoopModal] = useState(false);
   const [showSleepModal, setShowSleepModal] = useState(false);
-  const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [showNotesModal, setShowNotesModal] = useState(false);
-  const [showAIModal, setShowAIModal] = useState(false);
-  const [snapshotToast, setSnapshotToast] = useState(false);
-  const [isSubscribed, setIsSubscribed] = useState(false);
   const [isAmbientOn, setIsAmbientOn] = useState(true);
   const [isStretchFit, setIsStretchFit] = useState(false);
-  const [newCommentText, setNewCommentText] = useState('');
-  const [localComments, setLocalComments] = useState<any[]>([]);
+  const [playbackError, setPlaybackError] = useState(false);
 
-  // Dislike count from Return YouTube Dislike API
-  const [dislikeCount, setDislikeCount] = useState<string>(currentVideo?.dislikes || '1.2K');
-  const [isDisliked, setIsDisliked] = useState(false);
-  const [hasSponsorBlock, setHasSponsorBlock] = useState(false);
+  const hasSponsorBlock = (currentVideo?.sponsorSegments?.length ?? 0) > 0;
 
   // Gesture Controls: Volume & Brightness & Double Tap Seek
   const [brightnessLevel, setBrightnessLevel] = useState(1.0); // 0.1 to 1.0
@@ -98,16 +86,12 @@ export const ProMaxPlayer: React.FC = () => {
   const [trackLayoutWidth, setTrackLayoutWidth] = useState(0);
   const videoViewRef = useRef<VideoView | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Position to start the next video from (set by playVideo's startAt).
+  const startAtRef = useRef(0);
 
-  // Extract clean 11-char YouTube ID if video is from YouTube
-  const youtubeId = useMemo(() => {
-    if (!currentVideo) return null;
-    return (
-      youtubeService.extractVideoId(currentVideo.id) ||
-      youtubeService.extractVideoId(currentVideo.videoUrl) ||
-      youtubeService.extractVideoId(currentVideo.description || '')
-    );
-  }, [currentVideo?.id, currentVideo?.videoUrl, currentVideo?.description]);
+  // Only local files are played: downloaded videos and videos already on the device.
+  const hasDirectStream = !!currentVideo?.videoUrl && !playbackError;
+  const isPlayable = hasDirectStream;
   const controlsTimeoutRef = useRef<any>(null);
   const lastTapRef = useRef<number>(0);
   const hudTimerRef = useRef<any>(null);
@@ -172,69 +156,96 @@ export const ProMaxPlayer: React.FC = () => {
     }
   };
 
-  // Modern Expo Video player instance
-  const player = useVideoPlayer(currentVideo?.videoUrl ?? null, (p) => {
+  // One player for the component's lifetime; sources are swapped with replaceAsync.
+  // (Passing the URL to useVideoPlayer would recreate the player on every change.)
+  const player = useVideoPlayer(null, (p) => {
     p.loop = false;
     p.timeUpdateEventInterval = 0.25;
-    if (isPlaying) p.play();
   });
 
-  // Dynamically load new video source when currentVideo changes
+  // Capture the requested start position before any progress events overwrite it.
   useEffect(() => {
-    if (player && currentVideo?.videoUrl) {
-      try {
-        player.replace(currentVideo.videoUrl);
-        player.currentTime = 0;
-        if (isPlaying) {
-          player.play();
-        }
-      } catch (err) {
-        console.warn('Error updating player source:', err);
-      }
-    } else if (player && !currentVideo) {
-      try {
-        player.pause();
-      } catch {}
-    }
-  }, [currentVideo?.id, currentVideo?.videoUrl, player]);
+    startAtRef.current = currentTime;
+    setPlaybackError(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentVideo?.id]);
 
-  // Sync player playing state
+  // Route context seeks (A-B loop, notes, SponsorBlock, frame step) to the active surface.
   useEffect(() => {
-    if (!player) return;
-    if (isPlaying) {
-      player.play();
+    registerPlayerController({
+      seekTo: (seconds) => {
+        if (Platform.OS === 'web') {
+          if (videoRef.current) videoRef.current.currentTime = seconds;
+        } else {
+          player.currentTime = seconds;
+        }
+      },
+    });
+    return () => registerPlayerController(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player]);
+
+  // Load the direct stream into the native player
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let cancelled = false;
+    if (hasDirectStream && currentVideo?.videoUrl) {
+      player
+        .replaceAsync(currentVideo.videoUrl)
+        .then(() => {
+          if (cancelled) return;
+          player.currentTime = startAtRef.current;
+          if (isPlaying) player.play();
+        })
+        .catch((err) => {
+          console.warn('Error updating player source:', err);
+          if (!cancelled) setPlaybackError(true);
+        });
     } else {
       player.pause();
+      if (!currentVideo) player.replaceAsync(null).catch(() => {});
     }
-  }, [isPlaying, player]);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentVideo?.id, currentVideo?.videoUrl, hasDirectStream, player]);
 
-  // Sync playback speed
+  // Sync playing state, speed and volume to whichever surface is active
   useEffect(() => {
-    if (!player) return;
+    if (hasDirectStream && Platform.OS !== 'web') {
+      if (isPlaying) player.play();
+      else player.pause();
+    }
+  }, [isPlaying, hasDirectStream, player]);
+
+  useEffect(() => {
     player.playbackRate = playbackSpeed;
   }, [playbackSpeed, player]);
 
-  // Sync volume
   useEffect(() => {
-    if (!player) return;
     player.volume = volumeLevel;
     player.muted = volumeLevel === 0;
   }, [volumeLevel, player]);
 
-  // Listen to time updates & track finish
+  // Native player events. Context callbacks read refs, so subscribing once is safe.
   useEffect(() => {
-    if (!player) return;
     const timeSub = player.addListener('timeUpdate', (event) => {
-      updateVideoProgress(event.currentTime, player.duration || currentVideo?.durationSeconds || 0);
+      updateVideoProgress(event.currentTime, player.duration || 0);
     });
     const endSub = player.addListener('playToEnd', () => {
       pauseVideo();
     });
+    const statusSub = player.addListener('statusChange', ({ status }) => {
+      if (status === 'error') setPlaybackError(true);
+    });
     return () => {
       timeSub.remove();
       endSub.remove();
+      statusSub.remove();
     };
-  }, [player, currentVideo]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player]);
 
   // Pulse ambient glow
   useEffect(() => {
@@ -246,37 +257,12 @@ export const ProMaxPlayer: React.FC = () => {
     ).start();
   }, []);
 
-  // Sync comments & fetch real Return YouTube Dislike + SponsorBlock data
-  useEffect(() => {
-    if (currentVideo?.comments) {
-      setLocalComments(currentVideo.comments);
-    }
-    if (currentVideo?.id) {
-      youtubeService.getDislikeStats(currentVideo.id).then((stats) => {
-        if (stats && stats.dislikes) {
-          const formatted =
-            stats.dislikes >= 1000
-              ? `${(stats.dislikes / 1000).toFixed(1)}K`
-              : `${stats.dislikes}`;
-          setDislikeCount(formatted);
-        }
-      });
-
-      youtubeService.getSponsorSegments(currentVideo.id).then((segments) => {
-        if (segments && segments.length > 0) {
-          setHasSponsorBlock(true);
-          currentVideo.sponsorSegments = segments;
-        }
-      });
-    }
-  }, [currentVideo?.id]);
-
   // Sync HTML5 video on web for video source change
   useEffect(() => {
     if (Platform.OS === 'web' && videoRef.current) {
-      if (currentVideo?.videoUrl) {
+      if (hasDirectStream && currentVideo?.videoUrl) {
         videoRef.current.src = currentVideo.videoUrl;
-        videoRef.current.currentTime = 0;
+        videoRef.current.currentTime = startAtRef.current;
         if (isPlaying) {
           videoRef.current.play().catch(() => {});
         }
@@ -285,7 +271,7 @@ export const ProMaxPlayer: React.FC = () => {
         videoRef.current.src = '';
       }
     }
-  }, [currentVideo?.id, currentVideo?.videoUrl]);
+  }, [currentVideo?.id, currentVideo?.videoUrl, hasDirectStream]);
 
   // Sync HTML5 video on web for playback state & volume
   useEffect(() => {
@@ -300,16 +286,8 @@ export const ProMaxPlayer: React.FC = () => {
     }
   }, [isPlaying, playbackSpeed, volumeLevel]);
 
-  // Wrap seekTo to update both native & web
-  const seekTo = (seconds: number) => {
-    appSeekTo(seconds);
-    if (player) {
-      player.currentTime = seconds;
-    }
-    if (Platform.OS === 'web' && videoRef.current) {
-      videoRef.current.currentTime = seconds;
-    }
-  };
+  // The context seek moves the active surface through the registered controller.
+  const seekTo = appSeekTo;
 
   const showGestureHud = (type: 'brightness' | 'volume', val: number) => {
     setHudType(type);
@@ -414,35 +392,18 @@ export const ProMaxPlayer: React.FC = () => {
     return `${mins.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const handleSnapshot = () => {
-    setSnapshotToast(true);
-    setTimeout(() => setSnapshotToast(false), 2200);
-  };
+  // Downloaded video ids are `dl-<youtubeId>-<timestamp>`
+  const sourceYoutubeId = currentVideo?.id.match(/^dl-([a-zA-Z0-9_-]{11})-\d+$/)?.[1] ?? null;
 
   const handleShare = async () => {
+    if (!currentVideo || !sourceYoutubeId) return;
     try {
-      if (currentVideo) {
-        await Share.share({
-          message: `Watch "${currentVideo.title}" in 4K HDR on YouTube Pro Max! https://youtube.com/watch?v=${currentVideo.id}`,
-        });
-      }
+      await Share.share({
+        message: `${currentVideo.title} https://youtube.com/watch?v=${sourceYoutubeId}`,
+      });
     } catch {
       // Ignored
     }
-  };
-
-  const handleAddComment = () => {
-    if (!newCommentText.trim()) return;
-    const newComm = {
-      id: `c-user-${Date.now()}`,
-      author: 'You (Pro Max VIP)',
-      avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120',
-      text: newCommentText.trim(),
-      likes: 1,
-      timeAgo: 'Just now',
-    };
-    setLocalComments([newComm, ...localComments]);
-    setNewCommentText('');
   };
 
   if (!currentVideo || playerMode === 'closed') {
@@ -565,14 +526,6 @@ export const ProMaxPlayer: React.FC = () => {
 
             <TouchableOpacity
               style={[styles.headerBtn, { backgroundColor: colors.surface }]}
-              onPress={() => setShowAIModal(true)}
-              activeOpacity={0.7}
-            >
-              <MaterialCommunityIcons name="robot" size={18} color={colors.secondaryAccent} />
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.headerBtn, { backgroundColor: colors.surface }]}
               onPress={() => setShowEnhancerModal(true)}
               activeOpacity={0.7}
             >
@@ -585,44 +538,9 @@ export const ProMaxPlayer: React.FC = () => {
       {/* Video Viewport Container with PanResponder */}
       <View
         style={[styles.viewport, isFullscreen && styles.viewportFullscreen]}
-        {...(!youtubeId ? panResponder.panHandlers : {})}
+        {...(isPlayable ? panResponder.panHandlers : {})}
       >
-        {youtubeId ? (
-          Platform.OS === 'web' ? (
-            <iframe
-              key={youtubeId}
-              src={`https://www.youtube.com/embed/${youtubeId}?autoplay=1&playsinline=1&enablejsapi=1&origin=https://www.youtube.com&rel=0`}
-              style={{
-                width: '100%',
-                height: '100%',
-                border: 'none',
-                backgroundColor: '#000000',
-              }}
-              referrerPolicy="strict-origin-when-cross-origin"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-              allowFullScreen
-            />
-          ) : (
-            <WebView
-              key={youtubeId}
-              style={styles.nativeVideo}
-              javaScriptEnabled={true}
-              domStorageEnabled={true}
-              allowsInlineMediaPlayback={true}
-              mediaPlaybackRequiresUserAction={false}
-              allowsFullscreenVideo={true}
-              originWhitelist={['*']}
-              mixedContentMode="always"
-              userAgent="Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-              source={{
-                uri: `https://www.youtube.com/embed/${youtubeId}?autoplay=1&playsinline=1&enablejsapi=1&rel=0`,
-                headers: {
-                  Referer: 'https://www.youtube.com',
-                },
-              }}
-            />
-          )
-        ) : currentVideo.videoUrl ? (
+        {hasDirectStream ? (
           Platform.OS === 'web' ? (
             <video
               key={currentVideo.id}
@@ -642,6 +560,7 @@ export const ProMaxPlayer: React.FC = () => {
                 updateVideoProgress(cur, dur);
               }}
               onEnded={() => pauseVideo()}
+              onError={() => setPlaybackError(true)}
             />
           ) : (
             <VideoView
@@ -665,9 +584,9 @@ export const ProMaxPlayer: React.FC = () => {
         ) : (
           <View style={styles.noStreamOverlay}>
             <Ionicons name="videocam-off-outline" size={38} color={colors.accent} />
-            <Text style={styles.noStreamTitle}>Stream Not Available</Text>
+            <Text style={styles.noStreamTitle}>Cannot play this file</Text>
             <Text style={styles.noStreamDesc}>
-              No stream found. Please import a valid YouTube video link or upload directly from device storage.
+              The file is missing or in a format this device cannot play.
             </Text>
           </View>
         )}
@@ -751,16 +670,8 @@ export const ProMaxPlayer: React.FC = () => {
           </View>
         )}
 
-        {/* Snapshot Flash & Toast */}
-        {snapshotToast && (
-          <View style={styles.snapshotToast}>
-            <Ionicons name="camera" size={16} color="#10B981" />
-            <Text style={styles.snapshotToastText}>📸 Frame Snapshot Saved to Gallery!</Text>
-          </View>
-        )}
-
-        {/* Player Controls Overlay (For direct local videos) */}
-        {!youtubeId && showControls && (
+        {/* Player Controls Overlay (direct streams and the YouTube embed) */}
+        {isPlayable && showControls && (
           <View style={styles.controlsOverlay}>
             {/* Top Bar inside Overlay */}
             {isFullscreen ? (
@@ -926,15 +837,6 @@ export const ProMaxPlayer: React.FC = () => {
                     <Ionicons name="play-skip-forward" size={14} color="#FFFFFF" />
                   </TouchableOpacity>
 
-                  {/* 1-Click Snapshot */}
-                  <TouchableOpacity
-                    style={styles.utilIconBtn}
-                    onPress={handleSnapshot}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <Ionicons name="camera-outline" size={16} color="#FFFFFF" />
-                  </TouchableOpacity>
-
                   {/* Speed Selector Badge */}
                   <TouchableOpacity
                     style={[styles.speedBadge, { backgroundColor: 'rgba(255, 255, 255, 0.2)' }]}
@@ -959,28 +861,6 @@ export const ProMaxPlayer: React.FC = () => {
                 </View>
               </View>
             </View>
-          </View>
-        )}
-
-        {/* Fullscreen top exit button for YouTube player */}
-        {youtubeId && isFullscreen && (
-          <View style={[styles.fullscreenTopBar, { paddingTop: Platform.OS === 'android' ? 12 : topInset, position: 'absolute', top: 0, left: 0, right: 0, zIndex: 99 }]}>
-            <TouchableOpacity
-              style={styles.fullscreenBackBtn}
-              onPress={handleToggleFullscreen}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-            >
-              <Ionicons name="arrow-back" size={22} color="#FFFFFF" />
-            </TouchableOpacity>
-            <Text style={styles.fullscreenTitle} numberOfLines={1}>
-              {currentVideo.title}
-            </Text>
-            <TouchableOpacity
-              style={styles.fullscreenTopActionBtn}
-              onPress={handleToggleFullscreen}
-            >
-              <MaterialCommunityIcons name="fullscreen-exit" size={20} color="#FFFFFF" />
-            </TouchableOpacity>
           </View>
         )}
 
@@ -1034,13 +914,19 @@ export const ProMaxPlayer: React.FC = () => {
 
           {/* Stats Bar */}
           <Text style={[styles.viewsCount, { color: colors.textMuted }]}>
-            {currentVideo.views} views • {currentVideo.publishedAt} • 4K HDR 60fps
+            {[currentVideo.views && `${currentVideo.views} views`, currentVideo.publishedAt, currentVideo.duration]
+              .filter(Boolean)
+              .join(' • ')}
           </Text>
 
           {/* Channel Row */}
           <View style={[styles.channelBar, { borderColor: colors.divider }]}>
             <View style={styles.channelLeft}>
-              <Image source={{ uri: currentVideo.channelAvatar }} style={styles.channelAvatar} />
+              {currentVideo.channelAvatar ? (
+                <Image source={{ uri: currentVideo.channelAvatar }} style={styles.channelAvatar} />
+              ) : (
+                <View style={[styles.channelAvatar, { backgroundColor: colors.surfaceSubtle }]} />
+              )}
               <View>
                 <View style={styles.channelNameRow}>
                   <Text style={[styles.channelTitle, { color: colors.textPrimary }]}>
@@ -1051,36 +937,11 @@ export const ProMaxPlayer: React.FC = () => {
                   )}
                 </View>
                 <Text style={[styles.subscriberCount, { color: colors.textMuted }]}>
-                  {currentVideo.channelSubscribers} subscribers
+                  {currentVideo.channelSubscribers}
                 </Text>
               </View>
             </View>
 
-            <TouchableOpacity
-              style={[
-                styles.subscribeBtn,
-                {
-                  backgroundColor: isSubscribed ? colors.surfaceSubtle : colors.textPrimary,
-                },
-              ]}
-              onPress={() => setIsSubscribed(!isSubscribed)}
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name={isSubscribed ? 'notifications' : 'notifications-outline'}
-                size={14}
-                color={isSubscribed ? colors.accent : colors.background}
-                style={{ marginRight: 4 }}
-              />
-              <Text
-                style={[
-                  styles.subscribeBtnText,
-                  { color: isSubscribed ? colors.textPrimary : colors.background },
-                ]}
-              >
-                {isSubscribed ? 'Subscribed' : 'Subscribe'}
-              </Text>
-            </TouchableOpacity>
           </View>
 
           {/* Horizontal Pro Actions Toolbar (YouTube Standard + Vanced Beyond) */}
@@ -1112,28 +973,8 @@ export const ProMaxPlayer: React.FC = () => {
               </Text>
             </TouchableOpacity>
 
-            {/* Return YouTube Dislike (Real counts!) */}
-            <TouchableOpacity
-              style={[
-                styles.actionPill,
-                {
-                  backgroundColor: isDisliked ? 'rgba(255, 255, 255, 0.15)' : colors.surfaceSubtle,
-                  borderColor: colors.divider,
-                },
-              ]}
-              onPress={() => setIsDisliked(!isDisliked)}
-            >
-              <Ionicons
-                name={isDisliked ? 'thumbs-down' : 'thumbs-down-outline'}
-                size={16}
-                color={colors.textPrimary}
-              />
-              <Text style={[styles.pillText, { color: colors.textMuted }]}>
-                {dislikeCount}
-              </Text>
-            </TouchableOpacity>
-
-            {/* Share */}
+            {/* Share YouTube link (downloaded videos only) */}
+            {sourceYoutubeId && (
             <TouchableOpacity
               style={[
                 styles.actionPill,
@@ -1144,44 +985,7 @@ export const ProMaxPlayer: React.FC = () => {
               <Ionicons name="share-social-outline" size={16} color={colors.textPrimary} />
               <Text style={[styles.pillText, { color: colors.textPrimary }]}>Share</Text>
             </TouchableOpacity>
-
-            {/* Permanent Offline Download Button */}
-            <TouchableOpacity
-              style={[
-                styles.actionPill,
-                {
-                  backgroundColor: isDownloaded(currentVideo.id)
-                    ? 'rgba(16, 185, 129, 0.2)'
-                    : colors.surfaceSubtle,
-                  borderColor: isDownloaded(currentVideo.id) ? '#10B981' : colors.divider,
-                },
-              ]}
-              onPress={() => setShowDownloadModal(true)}
-            >
-              <Ionicons
-                name={isDownloaded(currentVideo.id) ? 'checkmark-circle' : 'download-outline'}
-                size={16}
-                color={isDownloaded(currentVideo.id) ? '#10B981' : colors.textPrimary}
-              />
-              <Text style={[styles.pillText, { color: colors.textPrimary }]}>
-                {isDownloaded(currentVideo.id) ? 'Saved 4K ♾️' : 'Download 4K'}
-              </Text>
-            </TouchableOpacity>
-
-            {/* AI Insights & Summarizer */}
-            <TouchableOpacity
-              style={[
-                styles.actionPill,
-                {
-                  backgroundColor: 'rgba(139, 92, 246, 0.2)',
-                  borderColor: colors.secondaryAccent,
-                },
-              ]}
-              onPress={() => setShowAIModal(true)}
-            >
-              <MaterialCommunityIcons name="robot" size={16} color={colors.secondaryAccent} />
-              <Text style={[styles.pillText, { color: colors.secondaryAccent }]}>AI Summary</Text>
-            </TouchableOpacity>
+            )}
 
             {/* Video Enhancer */}
             <TouchableOpacity
@@ -1256,85 +1060,46 @@ export const ProMaxPlayer: React.FC = () => {
           </ScrollView>
 
           {/* Video Description Box */}
+          {(!!currentVideo.description || (currentVideo.chapters?.length ?? 0) > 0) && (
           <View
             style={[
               styles.descriptionBox,
               { backgroundColor: colors.surface, borderColor: colors.cardBorder },
             ]}
           >
-            <Text style={[styles.descTitle, { color: colors.textPrimary }]}>Description</Text>
-            <Text style={[styles.descContent, { color: colors.textSecondary }]}>
-              {currentVideo.description}
-            </Text>
+            {currentVideo.chapters && currentVideo.chapters.length > 0 && (
+              <>
+                <Text style={[styles.descTitle, { color: colors.textPrimary }]}>Chapters</Text>
+                {currentVideo.chapters.map((chapter) => (
+                  <TouchableOpacity
+                    key={`${chapter.timestamp}-${chapter.title}`}
+                    onPress={() => seekTo(chapter.timestamp)}
+                  >
+                    <Text style={[styles.descContent, { color: colors.textSecondary }]}>
+                      <Text style={{ color: colors.accent }}>{chapter.timeFormatted}</Text>  {chapter.title}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+            {!!currentVideo.description && (
+              <>
+                <Text style={[styles.descTitle, { color: colors.textPrimary }]}>Description</Text>
+                {/* Piped returns the description as HTML; show it as plain text */}
+                <Text style={[styles.descContent, { color: colors.textSecondary }]} selectable>
+                  {currentVideo.description.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')}
+                </Text>
+              </>
+            )}
           </View>
+          )}
 
-          {/* Comments Section */}
-          <View style={[styles.commentsSection, { borderColor: colors.divider }]}>
-            <View style={styles.commentsHeader}>
-              <Text style={[styles.commentsTitle, { color: colors.textPrimary }]}>
-                Comments ({localComments.length})
-              </Text>
-              <Text style={[styles.proBadgeLabel, { color: colors.accent }]}>
-                PRO MAX VIP
-              </Text>
-            </View>
-
-            {/* New Comment Input */}
-            <View
-              style={[
-                styles.commentInputRow,
-                { backgroundColor: colors.surface, borderColor: colors.divider },
-              ]}
-            >
-              <TextInput
-                style={[styles.commentInput, { color: colors.textPrimary }]}
-                placeholder="Add a comment to this video..."
-                placeholderTextColor={colors.textMuted}
-                value={newCommentText}
-                onChangeText={setNewCommentText}
-                onSubmitEditing={handleAddComment}
-              />
-              <TouchableOpacity
-                style={[styles.postCommentBtn, { backgroundColor: colors.accent }]}
-                onPress={handleAddComment}
-                disabled={!newCommentText.trim()}
-              >
-                <Ionicons name="send" size={13} color="#FFFFFF" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Comment Items */}
-            {localComments.map((comment) => (
-              <View key={comment.id} style={styles.commentItem}>
-                <Image source={{ uri: comment.avatar }} style={styles.commentAvatar} />
-                <View style={styles.commentContent}>
-                  <View style={styles.commentMeta}>
-                    <Text style={[styles.commentAuthor, { color: colors.textPrimary }]}>
-                      {comment.author}
-                    </Text>
-                    <Text style={[styles.commentTime, { color: colors.textMuted }]}>
-                      {comment.timeAgo}
-                    </Text>
-                  </View>
-                  <Text style={[styles.commentText, { color: colors.textSecondary }]}>
-                    {comment.text}
-                  </Text>
-                  <View style={styles.commentActions}>
-                    <TouchableOpacity style={styles.commentLikeBtn}>
-                      <Ionicons name="heart-outline" size={13} color={colors.textMuted} />
-                      <Text style={[styles.commentLikesText, { color: colors.textMuted }]}>
-                        {comment.likes}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            ))}
-            {/* UP NEXT RECOMMENDED SECTION (Only real user videos) */}
-            {userUploadedVideos.filter((v) => v.id !== currentVideo.id).length > 0 && (
+          <View>
+            {/* UP NEXT: other downloaded videos */}
+            {downloadedVideoItems.filter((v) => v.id !== currentVideo.id).length > 0 && (
               <View style={styles.upNextSection}>
                 <Text style={[styles.upNextHeading, { color: colors.textSecondary }]}>UP NEXT</Text>
-                {userUploadedVideos
+                {downloadedVideoItems
                   .filter((v) => v.id !== currentVideo.id)
                   .map((item) => (
                     <TouchableOpacity
@@ -1343,7 +1108,10 @@ export const ProMaxPlayer: React.FC = () => {
                       onPress={() => playVideo(item)}
                       activeOpacity={0.8}
                     >
-                      <Image source={{ uri: item.thumbnail }} style={styles.upNextThumb} />
+                      <Image
+                        source={item.thumbnail ? { uri: item.thumbnail } : undefined}
+                        style={[styles.upNextThumb, { backgroundColor: colors.surfaceSubtle }]}
+                      />
                       <View style={styles.upNextMeta}>
                         <Text style={[styles.upNextTitle, { color: colors.textPrimary }]} numberOfLines={2}>
                           {item.title}
@@ -1365,9 +1133,7 @@ export const ProMaxPlayer: React.FC = () => {
       <VideoEnhancerModal visible={showEnhancerModal} onClose={() => setShowEnhancerModal(false)} />
       <ABLoopModal visible={showABLoopModal} onClose={() => setShowABLoopModal(false)} />
       <SleepTimerModal visible={showSleepModal} onClose={() => setShowSleepModal(false)} />
-      <DownloadModal visible={showDownloadModal} onClose={() => setShowDownloadModal(false)} video={currentVideo} />
       <NotesModal visible={showNotesModal} onClose={() => setShowNotesModal(false)} video={currentVideo} />
-      <VideoAIAssistant visible={showAIModal} onClose={() => setShowAIModal(false)} video={currentVideo} />
     </View>
   );
 };

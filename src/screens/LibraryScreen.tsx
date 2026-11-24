@@ -2,13 +2,11 @@ import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Modal, TextInput } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useApp } from '../context/AppContext';
-import { DownloadsScreen } from './DownloadsScreen';
 import { VideoItem, TimestampNote, Playlist } from '../types';
 
 export const LibraryScreen: React.FC = () => {
   const {
     colors,
-    downloads,
     notes,
     likedVideoIds,
     watchHistory,
@@ -18,17 +16,11 @@ export const LibraryScreen: React.FC = () => {
     playVideo,
     removeTimestampNote,
     seekTo,
-    userUploadedVideos,
-    setActiveTab,
+    downloadedVideoItems,
   } = useApp();
 
-  const [showDownloadsView, setShowDownloadsView] = useState(false);
   const [showNewPlaylistModal, setShowNewPlaylistModal] = useState(false);
   const [playlistName, setPlaylistName] = useState('');
-
-  if (showDownloadsView) {
-    return <DownloadsScreen onBack={() => setShowDownloadsView(false)} />;
-  }
 
   const handleCreatePlaylist = async () => {
     if (!playlistName.trim()) return;
@@ -37,8 +29,8 @@ export const LibraryScreen: React.FC = () => {
     setShowNewPlaylistModal(false);
   };
 
-  // Only real videos uploaded/imported by user (NO DUMMY VIDEOS)
-  const allAvailableVideos = [...userUploadedVideos];
+  // History, likes and notes resolve against the downloaded videos
+  const allAvailableVideos = downloadedVideoItems;
   const likedVideos = allAvailableVideos.filter((v: VideoItem) => likedVideoIds.includes(v.id));
   const historyVideos = watchHistory
     .map((h: { videoId: string; watchedAt: string; progressPercent: number }) => ({
@@ -58,90 +50,10 @@ export const LibraryScreen: React.FC = () => {
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: colors.divider }]}>
-        <Text style={[styles.headerTitle, { color: colors.textPrimary }]}>Pro Max Library</Text>
-        <TouchableOpacity
-          style={[styles.downloadsShortcutBtn, { backgroundColor: colors.surface }]}
-          onPress={() => setShowDownloadsView(true)}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="download" size={16} color={colors.accent} />
-          <Text style={[styles.downloadsShortcutText, { color: colors.accent }]}>
-            Vault ({downloads.length})
-          </Text>
-        </TouchableOpacity>
+        <Text style={[styles.headerTitle, { color: colors.textPrimary }]}>Library</Text>
       </View>
 
       <ScrollView style={styles.scrollArea} showsVerticalScrollIndicator={false}>
-        {/* PERMANENT OFFLINE VAULT FEATURE CARD */}
-        <TouchableOpacity
-          style={[
-            styles.vaultCard,
-            { backgroundColor: colors.cardBg, borderColor: colors.cardBorder, shadowColor: colors.accent },
-          ]}
-          onPress={() => setShowDownloadsView(true)}
-          activeOpacity={0.85}
-        >
-          <View style={styles.vaultCardLeft}>
-            <View style={[styles.vaultIconWrap, { backgroundColor: colors.accent }]}>
-              <Ionicons name="download" size={20} color="#FFFFFF" />
-            </View>
-            <View>
-              <View style={styles.vaultTitleRow}>
-                <Text style={[styles.vaultTitle, { color: colors.textPrimary }]}>Permanent Offline Vault</Text>
-                <View style={styles.neverExpiresBadge}>
-                  <MaterialCommunityIcons name="infinity" size={12} color="#10B981" />
-                  <Text style={styles.neverExpiresBadgeText}>Never Expires</Text>
-                </View>
-              </View>
-              <Text style={[styles.vaultSub, { color: colors.textMuted }]}>
-                {downloads.length} videos stored permanently on your device
-              </Text>
-            </View>
-          </View>
-          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
-        </TouchableOpacity>
-
-        {/* STORED & IMPORTED VIDEOS (From Studio / YouTube Import) */}
-        <View style={styles.sectionHeaderRow}>
-          <View style={styles.sectionTitleWithBadge}>
-            <Text style={[styles.sectionHeading, { color: colors.textSecondary }]}>MY UPLOADS & IMPORTS</Text>
-            <View style={[styles.countBadge, { backgroundColor: colors.surfaceSubtle }]}>
-              <Text style={[styles.countBadgeText, { color: colors.accent }]}>{userUploadedVideos.length}</Text>
-            </View>
-          </View>
-          <TouchableOpacity onPress={() => setActiveTab('studio')}>
-            <Text style={[styles.clearBtnText, { color: colors.accent }]}>+ Import / Upload</Text>
-          </TouchableOpacity>
-        </View>
-
-        {userUploadedVideos.length === 0 ? (
-          <View style={[styles.emptySectionBox, { backgroundColor: colors.surface, borderColor: colors.divider }]}>
-            <Ionicons name="cloud-upload-outline" size={24} color={colors.textMuted} />
-            <Text style={[styles.emptySectionText, { color: colors.textMuted }]}>
-              No imported YouTube links or device uploads yet. Go to Studio to import or upload!
-            </Text>
-          </View>
-        ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.historyRow}>
-            {userUploadedVideos.map((item: VideoItem) => (
-              <TouchableOpacity
-                key={item.id}
-                style={styles.historyCard}
-                onPress={() => playVideo(item)}
-                activeOpacity={0.8}
-              >
-                <Image source={{ uri: item.thumbnail }} style={styles.historyThumb} />
-                <Text style={[styles.historyTitle, { color: colors.textPrimary }]} numberOfLines={2}>
-                  {item.title}
-                </Text>
-                <Text style={[styles.historyChannel, { color: colors.textMuted }]} numberOfLines={1}>
-                  {item.id.startsWith('yt-import') ? 'YouTube Import' : 'Device Storage'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
-
         {/* TIMESTAMPED NOTES SECTION */}
         <View style={styles.sectionHeaderRow}>
           <View style={styles.sectionTitleWithBadge}>
@@ -214,7 +126,7 @@ export const LibraryScreen: React.FC = () => {
                 onPress={() => playVideo(item)}
                 activeOpacity={0.8}
               >
-                <Image source={{ uri: item.thumbnail }} style={styles.historyThumb} />
+                <Image source={item.thumbnail ? { uri: item.thumbnail } : undefined} style={[styles.historyThumb, { backgroundColor: colors.surfaceSubtle }]} />
                 <Text style={[styles.historyTitle, { color: colors.textPrimary }]} numberOfLines={2}>
                   {item.title}
                 </Text>
@@ -252,7 +164,7 @@ export const LibraryScreen: React.FC = () => {
                 onPress={() => playVideo(item)}
                 activeOpacity={0.8}
               >
-                <Image source={{ uri: item.thumbnail }} style={styles.historyThumb} />
+                <Image source={item.thumbnail ? { uri: item.thumbnail } : undefined} style={[styles.historyThumb, { backgroundColor: colors.surfaceSubtle }]} />
                 <Text style={[styles.historyTitle, { color: colors.textPrimary }]} numberOfLines={2}>
                   {item.title}
                 </Text>
@@ -278,7 +190,7 @@ export const LibraryScreen: React.FC = () => {
               key={pl.id}
               style={[styles.playlistItem, { backgroundColor: colors.surface, borderColor: colors.divider }]}
             >
-              <Image source={{ uri: pl.thumbnail }} style={styles.plThumb} />
+              <Image source={pl.thumbnail ? { uri: pl.thumbnail } : undefined} style={[styles.plThumb, { backgroundColor: colors.surfaceSubtle }]} />
               <View style={styles.plInfo}>
                 <Text style={[styles.plTitle, { color: colors.textPrimary }]}>{pl.name}</Text>
                 <Text style={[styles.plMeta, { color: colors.textMuted }]}>

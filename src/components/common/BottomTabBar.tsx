@@ -1,12 +1,13 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../../context/AppContext';
 
 export const BottomTabBar: React.FC = () => {
-  const { activeTab, setActiveTab, colors, downloads, notes } = useApp();
+  const { activeTab, setActiveTab, colors, notes, downloadJobs } = useApp();
 
-  const totalLibraryItems = downloads.length + notes.length;
+  const totalLibraryItems = notes.length;
+  const activeDownloads = downloadJobs.filter((j) => j.status === 'downloading').length;
 
   return (
     <View
@@ -42,46 +43,51 @@ export const BottomTabBar: React.FC = () => {
         )}
       </TouchableOpacity>
 
-      {/* Shorts Tab */}
+      {/* Device Videos Tab */}
       <TouchableOpacity
         style={styles.tabItem}
-        onPress={() => setActiveTab('shorts')}
+        onPress={() => setActiveTab('device')}
         activeOpacity={0.7}
       >
-        <MaterialCommunityIcons
-          name={activeTab === 'shorts' ? 'lightning-bolt' : 'lightning-bolt-outline'}
-          size={24}
-          color={activeTab === 'shorts' ? colors.accent : colors.textMuted}
+        <Ionicons
+          name={activeTab === 'device' ? 'phone-portrait' : 'phone-portrait-outline'}
+          size={22}
+          color={activeTab === 'device' ? colors.accent : colors.textMuted}
         />
         <Text
           style={[
             styles.tabLabel,
-            { color: activeTab === 'shorts' ? colors.accent : colors.textMuted },
+            { color: activeTab === 'device' ? colors.accent : colors.textMuted },
           ]}
         >
-          Shorts
+          Device
         </Text>
-        {activeTab === 'shorts' && (
+        {activeTab === 'device' && (
           <View style={[styles.activeIndicator, { backgroundColor: colors.accent, shadowColor: colors.accent }]} />
         )}
       </TouchableOpacity>
 
-      {/* Studio (+) Tab */}
+      {/* Download (+) Tab */}
       <TouchableOpacity
         style={styles.centerTabItem}
-        onPress={() => setActiveTab('studio')}
+        onPress={() => setActiveTab('download')}
         activeOpacity={0.8}
       >
         <View style={[styles.centerPlusButton, { backgroundColor: colors.accent, shadowColor: colors.accent }]}>
-          <Ionicons name="add" size={28} color="#FFFFFF" />
+          <Ionicons name="download" size={24} color="#FFFFFF" />
+          {activeDownloads > 0 && (
+            <View style={[styles.badge, { backgroundColor: colors.secondaryAccent }]}>
+              <Text style={styles.badgeText}>{activeDownloads}</Text>
+            </View>
+          )}
         </View>
         <Text
           style={[
             styles.tabLabel,
-            { color: activeTab === 'studio' ? colors.accent : colors.textMuted, marginTop: 3 },
+            { color: activeTab === 'download' ? colors.accent : colors.textMuted, marginTop: 3 },
           ]}
         >
-          Studio
+          Download
         </Text>
       </TouchableOpacity>
 
